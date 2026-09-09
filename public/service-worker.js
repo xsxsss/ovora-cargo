@@ -1,8 +1,8 @@
 // Service Worker для Ovora Cargo PWA
-const CACHE_VERSION = 'v4.0.30';
+const CACHE_VERSION = 'v4.0.31';
 const STATIC_CACHE  = `ovora-static-${CACHE_VERSION}`;
 const DYNAMIC_CACHE = `ovora-dynamic-${CACHE_VERSION}`;
-const BASE_PATH     = '/Ovoracargomobiledevelopment/';
+const BASE_PATH     = '/';
 
 function isImmutableAsset(url) {
   return (

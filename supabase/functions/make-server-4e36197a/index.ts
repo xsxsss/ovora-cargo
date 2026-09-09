@@ -1,5 +1,6 @@
 import { Hono } from "npm:hono";
 import { setupAviaRoutes } from "./aviaRoutes.tsx";
+import { signUserToken, verifiedEmailFromToken, userAuthEnabled } from "./userAuth.tsx";
 import * as bcryptAvia from "npm:bcryptjs"; // used by legacy dead-code block below
 import { cors } from "npm:hono/cors";
 import { logger } from "npm:hono/logger";
@@ -78,7 +79,7 @@ app.use("/*", cors({
     if (/^https?:\/\/([a-z0-9-]+\.)?ovora-cargo\.ru$/.test(origin)) return origin;
     return null; // deny
   },
-  allowHeaders: ["Content-Type", "Authorization", "X-Admin-Code", "X-Admin-Token", "X-Csrf-Token"],
+  allowHeaders: ["Content-Type", "Authorization", "X-Admin-Code", "X-Admin-Token", "X-Csrf-Token", "X-User-Token", "X-Avia-Token"],
   allowMethods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   exposeHeaders: ["Content-Length"],
   credentials: true,
@@ -100,6 +101,15 @@ app.use("/*", async (c, next) => {
   if (c.req.header(CSRF_HEADER_NAME) !== CSRF_EXPECTED) {
     return c.json({ error: "Missing or invalid CSRF token" }, 403);
   }
+  return await next();
+});
+
+// ── User-auth: проставляем verifiedEmail из X-User-Token ──────────────────────
+// Если USER_JWT_SECRET настроен и токен валиден — кладём подтверждённый email в
+// контекст, откуда его читает getCallerEmail(). Без секрета — no-op (legacy).
+app.use("/*", async (c, next) => {
+  const email = await verifiedEmailFromToken(c);
+  if (email) c.set("verifiedEmail", email);
   return await next();
 });
 
@@ -128,9 +138,15 @@ async function requireAdminChecked(c: any, next: any) {
 }
 
 // ── callerEmail: prefer JWT, fallback to body (legacy) ─────────────────────
+// Когда USER_JWT_SECRET настроен, доверяем ТОЛЬКО email из проверенного токена
+// (его ставит user-auth middleware ниже). Значение callerEmail из тела запроса
+// в этом режиме игнорируется — иначе IDOR-проверки можно обойти подстановкой
+// чужого email. Пока секрет не задан — legacy-режим (тело), чтобы не сломать
+// прод до активации токенов на фронте.
 function getCallerEmail(c: any, body?: any): string | null {
   const jwtEmail = c.get("verifiedEmail");
   if (jwtEmail) return jwtEmail;
+  if (userAuthEnabled()) return null;
   return body?.callerEmail || null;
 }
 
@@ -1411,6 +1427,15 @@ app.post("/make-server-4e36197a/offers",
     if (!senderEmail) return c.json({ error: "senderEmail required" }, 400);
     if (!senderName) return c.json({ error: "senderName required" }, 400);
 
+    // 🔒 Нельзя создать оферту от чужого имени: при активной токен-авторизации
+    // senderEmail должен совпадать с владельцем токена. В legacy-режиме — no-op.
+    if (userAuthEnabled()) {
+      const caller = getCallerEmail(c, body);
+      if (!caller || caller.toLowerCase().trim() !== senderEmail.toLowerCase().trim()) {
+        return c.json({ error: "Forbidden: senderEmail must match authenticated user" }, 403);
+      }
+    }
+
     // ✅ Запрет дублей: у одного отправителя не может быть двух pending-оферт
     // на один и тот же рейс одновременно (иначе можно наспамить дублями с
     // разными ценами) — список оферт рейса невелик, full-scan по tripId безопасен.
@@ -2362,6 +2387,15 @@ app.post("/make-server-4e36197a/chat/message", async (c) => {
     const body = await c.req.json();
     const { chatId, senderId, senderName, senderAvatar, text, type, proposal, from, participants } = body;
     if (!chatId || !senderId) return c.json({ error: "chatId, senderId required" }, 400);
+
+    // 🔒 Нельзя писать от чужого имени: при активной токен-авторизации senderId
+    // должен совпадать с владельцем токена. В legacy-режиме — no-op.
+    if (userAuthEnabled()) {
+      const caller = getCallerEmail(c, body);
+      if (!caller || caller.toLowerCase().trim() !== String(senderId).toLowerCase().trim()) {
+        return c.json({ error: "Forbidden: senderId must match authenticated user" }, 403);
+      }
+    }
 
     // Проверка: senderId должен быть участником чата
     const metaCheck: any = await kv.get(`ovora:chatmeta:${chatId}`);

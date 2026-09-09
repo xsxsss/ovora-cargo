@@ -6,3 +6,13 @@ node_modules/
 .DS_Store
 supabase/.temp/
 .mcp.json
+.vercel
+
+# Локальная резервная копия проекта — не версионируем
+Ovoracargomobiledevelopment-main/
+
+# Тестовые артефакты и локальные инструменты
+test-results/
+playwright-report/
+.playwright-cli/
+pr-body.md

@@ -51,6 +51,13 @@ function getHeaders(path: string, isFormData: boolean): Record<string, string> {
   const isAdmin = path.startsWith('/admin/') || path.startsWith('/kv/');
   if (isAdmin) {
     Object.assign(headers, getAdminAuthHeader());
+  } else if (typeof localStorage !== 'undefined') {
+    // Сессионный токен пользователя (X-User-Token). Активируется, когда бэкенд
+    // настроен с USER_JWT_SECRET; иначе токена нет и бэкенд работает в legacy-режиме.
+    try {
+      const userToken = localStorage.getItem('ovora_user_token');
+      if (userToken) headers['X-User-Token'] = userToken;
+    } catch { /* ignore */ }
   }
   return headers;
 }

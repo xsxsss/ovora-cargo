@@ -1,0 +1,11 @@
+# Резервная копия проекта — не деплоить
+Ovoracargomobiledevelopment-main/
+
+# Тестовые артефакты и локальные инструменты
+test-results/
+.playwright-cli/
+playwright-report/
+
+# Прочее
+*.log
+pr-body.md

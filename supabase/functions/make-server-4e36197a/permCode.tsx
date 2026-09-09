@@ -12,6 +12,7 @@
 import type { Context } from "npm:hono";
 import * as kv from "./kv_store.tsx";
 import * as bcrypt from "npm:bcryptjs";
+import { signUserToken } from "./userAuth.tsx";
 
 const MAX_ATTEMPTS = 10;
 const BCRYPT_ROUNDS = 12; // Высокий cost-фактор = медленный брутфорс
@@ -174,7 +175,9 @@ export async function handleVerifyPermCode(c: Context) {
 
     await kv.set(permKey(email), { ...stored, attempts: 0, lastUsed: new Date().toISOString() });
     console.log(`[PermCode] ✅ Code verified for ${email}`);
-    return c.json({ success: true });
+    // Код подтверждён — выдаём сессионный токен (undefined, если USER_JWT_SECRET не настроен).
+    const token = await signUserToken(email);
+    return c.json({ success: true, token });
 
   } catch (err) {
     console.log("Error POST /auth/verify-perm-code:", err);

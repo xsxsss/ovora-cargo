@@ -38,6 +38,7 @@ const CURRENT_USER_KEY = 'ovora_current_user';
 const USER_EMAIL_KEY = 'ovora_user_email';
 const USER_ROLE_KEY = 'userRole';
 const PERSISTENT_AUTH_KEY = 'ovora_auth_persistent'; // { email, role } — persistent across browser restarts
+const USER_TOKEN_KEY = 'ovora_user_token'; // подписанный сервером JWT (X-User-Token), см. userAuth.tsx на бэкенде
 
 // ── Очистить все пользовательские данные из localStorage ──────────────────────
 function clearUserDataCache() {
@@ -227,6 +228,7 @@ export async function updateUser(updates: Partial<OvoraUser> & { email: string }
 export function logoutUser() {
   clearUserSession();
   localStorage.removeItem(CURRENT_USER_KEY);
+  try { localStorage.removeItem(USER_TOKEN_KEY); } catch { /* ignore */ }
   clearUserDataCache();
   clearApiCache(); // сбрасываем in-memory кэш dataApi — иначе следующий пользователь видит чужие данные
 }
@@ -274,6 +276,10 @@ export async function verifyPermCode(email: string, code: string): Promise<void>
   });
   const data = await res.json();
   if (!res.ok || !data.success) throw new Error(data.error || 'Неверный код доступа');
+  // Сохраняем сессионный токен (если бэкенд настроен с USER_JWT_SECRET; иначе undefined).
+  if (data.token) {
+    try { localStorage.setItem(USER_TOKEN_KEY, data.token); } catch { /* ignore */ }
+  }
 }
 
 /**

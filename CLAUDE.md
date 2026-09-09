@@ -25,27 +25,15 @@
 
 ## Git и деплой
 
-```
-origin  → локальный Gitea прокси (для Claude Code flow)
-github  → github.com/magamed99/Ovoracargomobiledevelopment (реальный GitHub)
-```
-
-**Ветки:**
-- `main-deploy` — основная рабочая ветка
-- `main` (на GitHub) → GitHub Actions → GitHub Pages → ovora-cargo.ru
-- `claude/*` — фича-ветки для PR
+**Воркфлоу: только локально + Vercel. GitHub больше не используется.**
 
 **Деплой:**
 ```bash
-# Применить изменения на продакшн:
-git push github HEAD:main
-
-# Пушить текущую работу:
-git push origin HEAD:main-deploy
-git push github HEAD:claude/<branch-name>
+# Задеплоить на продакшн:
+vercel --prod
 ```
 
-**Важно:** После `git push` всегда создавай PR на GitHub если его нет (`mcp__github__create_pull_request`).
+Сайт: **https://dly-a-prid.vercel.app**
 
 ---
 
@@ -222,20 +210,16 @@ npm run dev          # dev сервер
 npm run build        # production build → dist/
 npm run typecheck    # TypeScript проверка
 
-# Git
-git push origin HEAD:main-deploy           # пуш в Gitea
-git push github HEAD:main                  # деплой на GitHub Pages
-git push github HEAD:claude/<branch>       # пуш фича-ветки
+# Деплой
+vercel --prod        # задеплоить на https://dly-a-prid.vercel.app
 ```
 
 ---
 
 ## Правила для Claude
 
-1. **Коммить после каждого завершённого блока работы** — не накапливать изменения
-2. **Пушить в оба remote**: `origin HEAD:main-deploy` + `github HEAD:claude/<branch>`
-3. **PR создавать через `mcp__github__create_pull_request`** как draft
-4. **Не трогать `role`/`status`/`codeHash` в пользовательских эндпоинтах** — защищены whitelist
-5. **`callerEmail` обязателен** во всех write-операциях (cargos, offers, reviews, chats)
-6. **Переводы**: добавляй ключи сразу в `ru` + `tj` + `en`
-7. **Inline скрипты в `index.html` запрещены** — CSP без `unsafe-inline` для скриптов
+1. **Не трогать `role`/`status`/`codeHash` в пользовательских эндпоинтах** — защищены whitelist
+2. **`callerEmail` обязателен** во всех write-операциях (cargos, offers, reviews, chats)
+3. **Переводы**: добавляй ключи сразу в `ru` + `tj` + `en`
+4. **Inline скрипты в `index.html` запрещены** — CSP без `unsafe-inline` для скриптов
+5. **GitHub не используется** — работаем локально, деплой только через `vercel --prod`

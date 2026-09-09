@@ -243,7 +243,14 @@ export function setupAviaRoutes(app: Hono, deps: AviaDeps): void {
       const phone = aviaClean(decodeURIComponent(c.req.param('phone')));
       const user  = await Users.get(phone);
       if (!user) return c.json({ found: false });
-      return c.json({ found: true, user });
+
+      // Владелец (подтверждён X-Avia-Token) видит паспортные поля для страницы профиля.
+      // Прочим вызовам (напр. имя собеседника в чате) паспортные данные не отдаём.
+      const isOwner = await verifyAviaActor(c, phone);
+      if (isOwner) return c.json({ found: true, user });
+
+      const { passportNumber, passportPhoto, passportPhotoPath, ...safe } = user as any;
+      return c.json({ found: true, user: safe });
     } catch (err) {
       console.log('Error GET /avia/profile:', err);
       return c.json({ error: 'Внутренняя ошибка сервера' }, 500);
