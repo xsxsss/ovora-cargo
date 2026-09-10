@@ -40,6 +40,9 @@ jobs:
       - name: Build
         run: npm run build
         env:
+          # GitHub Pages отдаёт сайт из подпапки с именем репозитория, поэтому
+          # ассеты и роутер должны собираться с этим префиксом (на Vercel — корень).
+          VITE_BASE: /${{ github.event.repository.name }}/
           # DSN не секрет (см. Sentry docs) — безопасно хранить открыто, иначе
           # клиентский бандл всё равно его публикует у любого посетителя сайта.
           VITE_SENTRY_DSN: https://eece7ec757346f579308fcf051448120@o4510186278223872.ingest.us.sentry.io/4510186278354944

@@ -25,15 +25,23 @@
 
 ## Git и деплой
 
-**Воркфлоу: только локально + Vercel. GitHub больше не используется.**
+**Репозиторий:** `https://github.com/xsxsss/ovora-cargo.git` (remote `origin`, ветка `main`).
+
+Старый аккаунт `magamed99` заблокирован GitHub — вместе с ним оказался
+заблокирован и привязанный к нему Vercel-проект `dly-a-prid` (`live: false`,
+все деплои `BLOCKED`, снять паузу через API нельзя — 403). Поэтому проект
+переехал на новый аккаунт.
 
 **Деплой:**
 ```bash
-# Задеплоить на продакшн:
-vercel --prod
+git push origin HEAD:main    # пуш кода
 ```
+Хостинг подключается к репозиторию `xsxsss/ovora-cargo` и собирает из `main`.
 
-Сайт: **https://dly-a-prid.vercel.app**
+**Локальная проверка собранной версии:**
+```bash
+npm run build && npm run preview   # http://localhost:4173
+```
 
 ---
 

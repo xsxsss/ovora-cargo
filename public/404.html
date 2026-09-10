@@ -4,10 +4,17 @@
   <meta charset="utf-8">
   <title>Ovora Cargo</title>
   <script>
-    // SPA on GitHub Pages: store path, redirect to app root
-    sessionStorage.setItem('__spa_redirect', location.pathname + location.search + location.hash);
+    // SPA на GitHub Pages: сохраняем запрошенный путь и уходим на корень приложения,
+    // откуда spa-redirect.js его восстановит.
+    // Файл не проходит через Vite, поэтому базу берём из первого сегмента пути —
+    // на Pages это имя репозитория (/ovora-cargo/). Хардкодить имя нельзя: оно
+    // изменится при переименовании репозитория.
+    (function () {
+      sessionStorage.setItem('__spa_redirect', location.pathname + location.search + location.hash);
+      var first = location.pathname.split('/').filter(Boolean)[0];
+      location.replace(first ? '/' + first + '/' : '/');
+    })();
   </script>
-  <meta http-equiv="refresh" content="0;URL=/Ovoracargomobiledevelopment/">
 </head>
 <body></body>
 </html>

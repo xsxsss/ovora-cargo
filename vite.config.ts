@@ -17,7 +17,9 @@ function figmaAssetResolver() {
 }
 
 export default defineConfig({
-  base: '/',
+  // GitHub Pages отдаёт сайт из подпапки (/ovora-cargo/), Vercel — из корня (/).
+  // Путь задаётся переменной VITE_BASE при сборке; по умолчанию — корень.
+  base: process.env.VITE_BASE || '/',
   plugins: [
     figmaAssetResolver(),
     // The React and Tailwind plugins are both required for Make, even if
