@@ -32,11 +32,18 @@
 все деплои `BLOCKED`, снять паузу через API нельзя — 403). Поэтому проект
 переехал на новый аккаунт.
 
+**Живой сайт:** https://xsxsss.github.io/ovora-cargo/ (GitHub Pages)
+
 **Деплой:**
 ```bash
-git push origin HEAD:main    # пуш кода
+git push origin HEAD:main    # пуш → GitHub Actions → Pages, ~1-2 мин
 ```
-Хостинг подключается к репозиторию `xsxsss/ovora-cargo` и собирает из `main`.
+
+**Base-путь определяется автоматически** — не зашивай его константой:
+- GitHub Pages отдаёт из подпапки, workflow подставляет `VITE_BASE=/<имя репо>/`
+- Vercel отдаёт из корня — база остаётся `/`
+- Роутер берёт базу из `import.meta.env.BASE_URL`
+- `service-worker.js` и `404.html` вычисляют её из своего адреса (Vite их не обрабатывает)
 
 **Локальная проверка собранной версии:**
 ```bash
@@ -123,7 +130,11 @@ X-Admin-Token: <jwt>          // payload: { role: 'super-admin' | 'cargo-admin' 
 | `/admin/auth` | 15 req / 5 мин |
 
 ### CORS
-Разрешены только: `ovora-cargo.ru`, `magamed99.github.io`, `localhost:5173/4173`
+Разрешены только: `ovora-cargo.ru` (+ поддомены), `xsxsss.github.io`, `localhost:5173/4173`
+
+**Важно:** при переезде сайта на новый домен его нужно добавить в `ALLOWED_ORIGINS`
+(`index.ts`), иначе браузер получит `Failed to fetch` — бэкенд будет жив, но
+отклонит запросы с неизвестного origin.
 
 ---
 

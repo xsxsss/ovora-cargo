@@ -64,7 +64,9 @@ const ALLOWED_ORIGINS = [
   "http://ovora-cargo.ru",
   "https://www.ovora-cargo.ru",
   "http://www.ovora-cargo.ru",
-  "https://magamed99.github.io",
+  // GitHub Pages текущего аккаунта. Прежний домен magamed99.github.io удалён:
+  // аккаунт заблокирован GitHub и обслуживать сайт уже не может.
+  "https://xsxsss.github.io",
   // local dev
   "http://localhost:5173",
   "http://localhost:4173",
