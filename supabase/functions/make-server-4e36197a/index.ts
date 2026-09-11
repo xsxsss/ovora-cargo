@@ -3540,6 +3540,13 @@ function parseDocumentText(text: string, documentType: string): {
   const mrzLine2 = mrzCandidates.find(l => l !== mrzLine1 && /\d{6}/.test(l) && !MRZ_LINE1_RX.test(l));
 
   // ── Строка 1: страна выдачи + ФИО ──────────────────────────────
+  // ФИО из MRZ всегда латиницей (требование ICAO), поэтому НЕ пишем их сразу в
+  // firstName/lastName — иначе в профиль попадёт «SABUROV» вместо «Сабуров».
+  // Держим отдельно и подставим ниже только если со страницы паспорта кириллицу
+  // прочитать не удалось (напр. иностранный паспорт без кириллицы).
+  let mrzFirstName: string | null = null;
+  let mrzLastName: string | null = null;
+  let mrzPatronymic: string | null = null;
   if (mrzLine1) {
     const issuingCountry = mrzLine1.substring(2, 5).replace(/</g, '');
     if (issuingCountry) console.log('[Parser] MRZ issuing country:', issuingCountry);
@@ -3548,9 +3555,9 @@ function parseDocumentText(text: string, documentType: string): {
     if (dcIdx > 0) {
       const rawLast = nameSection.substring(0, dcIdx).replace(/</g, ' ').trim();
       const nameParts = nameSection.substring(dcIdx + 2).split('<').filter(p => p.length > 1);
-      if (rawLast.length > 1 && !lastName) { lastName = rawLast; console.log('[Parser] MRZ lastName:', lastName); }
-      if (nameParts.length > 0 && !firstName) { firstName = nameParts[0]; console.log('[Parser] MRZ firstName:', firstName); }
-      if (nameParts.length > 1 && !patronymic) { patronymic = nameParts[1]; console.log('[Parser] MRZ patronymic:', patronymic); }
+      if (rawLast.length > 1) { mrzLastName = rawLast; console.log('[Parser] MRZ lastName (latin, fallback):', mrzLastName); }
+      if (nameParts.length > 0) { mrzFirstName = nameParts[0]; console.log('[Parser] MRZ firstName (latin, fallback):', mrzFirstName); }
+      if (nameParts.length > 1) { mrzPatronymic = nameParts[1]; console.log('[Parser] MRZ patronymic (latin, fallback):', mrzPatronymic); }
     }
   }
 
@@ -3998,6 +4005,16 @@ function parseDocumentText(text: string, documentType: string): {
       console.log(`[Parser] Lost-name search SKIPPED — firstName="${firstName}" is valid (not a stopword).`);
     }
   }
+
+  // ══════════════════════════════════════════════════════════════
+  // 🔤 Запасной вариант ФИО — латиница из MRZ
+  // Приоритет у написания со страницы паспорта (кириллица для РФ/ТЖ): профиль
+  // должен совпадать с паспортом. Латиницу из MRZ берём, только если страницу
+  // распознать не вышло — напр. у иностранного паспорта без кириллицы.
+  // ══════════════════════════════════════════════════════════════
+  if (!lastName && mrzLastName)     { lastName = mrzLastName;     console.log('[Parser] lastName ← MRZ (кириллица не найдена)'); }
+  if (!firstName && mrzFirstName)   { firstName = mrzFirstName;   console.log('[Parser] firstName ← MRZ (кириллица не найдена)'); }
+  if (!patronymic && mrzPatronymic) { patronymic = mrzPatronymic; console.log('[Parser] patronymic ← MRZ (кириллица не найдена)'); }
 
   // ══════════════════════════════════════════════════════════════
   // 📋 Формируем полное имя (Фамилия Имя Отчество)
