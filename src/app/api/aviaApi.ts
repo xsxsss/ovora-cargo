@@ -14,10 +14,15 @@ function getHeaders(): Record<string, string> {
   return token ? { ...BASE_HEADERS, 'X-Avia-Token': token } : BASE_HEADERS;
 }
 
-/** Multipart-запросы (FormData) — без Content-Type, браузер сам выставит boundary */
+/** Multipart-запросы (FormData) — без Content-Type, браузер сам выставит boundary.
+ *  CSRF-заголовок обязателен: бэкенд отклоняет любой POST/PUT без него (403). */
 function getFormHeaders(): Record<string, string> {
   const token = getAviaSession()?.token;
-  return token ? { Authorization: `Bearer ${publicAnonKey}`, 'X-Avia-Token': token } : { Authorization: `Bearer ${publicAnonKey}` };
+  const base: Record<string, string> = {
+    Authorization: `Bearer ${publicAnonKey}`,
+    [CSRF_HEADER]: CSRF_TOKEN,
+  };
+  return token ? { ...base, 'X-Avia-Token': token } : base;
 }
 
 // ── Типы ─────────────────────────────────────────────────────────────────────
