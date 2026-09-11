@@ -33,10 +33,24 @@ export function ErrorPage() {
   useEffect(() => {
     if (!isStaleChunk) return;
     const lastReload = Number(sessionStorage.getItem(CHUNK_RELOAD_KEY) || 0);
-    if (Date.now() - lastReload > 10_000) {
-      sessionStorage.setItem(CHUNK_RELOAD_KEY, String(Date.now()));
+    if (Date.now() - lastReload < 30_000) return;
+    sessionStorage.setItem(CHUNK_RELOAD_KEY, String(Date.now()));
+    // Голая перезагрузка не помогает: кэш и service worker снова отдадут тот же
+    // устаревший index.html, который просит удалённые куски кода. Поэтому сначала
+    // сбрасываем их, и только потом перезагружаемся — иначе цикл не разорвать.
+    (async () => {
+      try {
+        if ('caches' in window) {
+          const keys = await caches.keys();
+          await Promise.all(keys.map(k => caches.delete(k)));
+        }
+        if ('serviceWorker' in navigator) {
+          const regs = await navigator.serviceWorker.getRegistrations();
+          await Promise.all(regs.map(r => r.unregister()));
+        }
+      } catch { /* очистка — лучшее усилие, перезагружаемся в любом случае */ }
       window.location.reload();
-    }
+    })();
   }, [isStaleChunk]);
 
   return (

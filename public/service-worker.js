@@ -1,5 +1,5 @@
 // Service Worker для Ovora Cargo PWA
-const CACHE_VERSION = 'v4.0.32';
+const CACHE_VERSION = 'v4.0.33';
 const STATIC_CACHE  = `ovora-static-${CACHE_VERSION}`;
 const DYNAMIC_CACHE = `ovora-dynamic-${CACHE_VERSION}`;
 // Файл не проходит через Vite, поэтому базу вычисляем из собственного адреса:
@@ -60,8 +60,14 @@ self.addEventListener('fetch', event => {
       })
     );
   } else {
+    // Навигацию (index.html) всегда тянем с сети мимо HTTP-кэша: иначе браузер
+    // отдаёт index.html прошлой сборки, который просит уже удалённые куски кода,
+    // и приложение падает в ошибку сразу после деплоя.
+    const networkFetch = request.mode === 'navigate'
+      ? fetch(request.url, { cache: 'reload', credentials: 'same-origin' })
+      : fetch(request);
     event.respondWith(
-      fetch(request)
+      networkFetch
         .then(response => {
           if (response.status === 200) {
             const clone = response.clone();
