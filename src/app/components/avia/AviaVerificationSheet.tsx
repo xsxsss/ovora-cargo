@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { X, ShieldCheck, ShieldAlert, ShieldX, FileText, Camera, Lock, Eye, EyeOff, CheckCircle2, AlertCircle, CalendarX2, Loader2, MessageCircle, ChevronRight, Clock, Fingerprint, BadgeCheck, Upload, Zap, Database, Globe, ImageIcon, Trash2, Mail, Phone } from 'lucide-react';
-import type { AviaUser } from '../../api/aviaApi';
+import type { AviaUser, AviaSupportContacts } from '../../api/aviaApi';
+import { getAviaSupportContacts } from '../../api/aviaApi';
 import { toast } from 'sonner';
 
 // ─── Shared atoms ─────────────────────────────────────────────────────────────
@@ -24,11 +25,14 @@ const labelStyle: React.CSSProperties = {
 // ─── Контакты поддержки ────────────────────────────────────────────────────────
 // Паспорт загружается один раз, сбросить его может только админ — поэтому
 // «Обновить паспорт» ведёт не к повторной загрузке, а к обращению в поддержку.
-// WHATSAPP_PHONE пуст → канал просто не показывается. Формат: только цифры,
-// с кодом страны, например '992900112233'.
-const SUPPORT_TELEGRAM = 'OvoraHelp';
-const SUPPORT_EMAIL    = 'support@ovora.tj';
-const SUPPORT_WHATSAPP = '';
+// Актуальные значения задаются в админке (AVIA → Настройки) и приходят с сервера;
+// эти — запасные, на случай если настройки пустые или недоступны.
+// Пустое значение = канал не показывается.
+const FALLBACK_CONTACTS: AviaSupportContacts = {
+  telegram: 'OvoraHelp',
+  email   : 'support@ovora.tj',
+  whatsapp: '',
+};
 
 // ─── Status config ─────────────────────────────────────────────────────────────
 
@@ -105,6 +109,17 @@ export function AviaVerificationSheet({
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [previewKey, setPreviewKey] = useState(0);
   const [showSupport, setShowSupport] = useState(false);
+  const [contacts, setContacts] = useState<AviaSupportContacts>(FALLBACK_CONTACTS);
+
+  // Контакты из админки. Если не заполнено ни одно поле — настройки ещё не
+  // сохраняли, показываем запасные. Если хоть одно есть — доверяем админке
+  // целиком: пустое поле там означает намеренно скрытый канал.
+  useEffect(() => {
+    if (!open) return;
+    getAviaSupportContacts().then(c => {
+      if (c.telegram || c.whatsapp || c.email) setContacts(c);
+    });
+  }, [open]);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -1006,21 +1021,23 @@ export function AviaVerificationSheet({
 
                           {(() => {
                             const msg = `Здравствуйте! Прошу сбросить паспорт для повторной загрузки. Мой номер в Ovora: +${user.phone}`;
+                            const waDigits = contacts.whatsapp.replace(/\D/g, '');
+                            const tgLogin  = contacts.telegram.replace(/^@/, '');
                             const channels = [
-                              SUPPORT_TELEGRAM && {
-                                key: 'tg', label: 'Telegram', hint: `@${SUPPORT_TELEGRAM}`,
+                              tgLogin && {
+                                key: 'tg', label: 'Telegram', hint: `@${tgLogin}`,
                                 icon: MessageCircle, color: '#0ea5e9',
-                                href: `https://t.me/${SUPPORT_TELEGRAM}`,
+                                href: `https://t.me/${tgLogin}`,
                               },
-                              SUPPORT_WHATSAPP && {
-                                key: 'wa', label: 'WhatsApp', hint: `+${SUPPORT_WHATSAPP}`,
+                              waDigits && {
+                                key: 'wa', label: 'WhatsApp', hint: `+${waDigits}`,
                                 icon: Phone, color: '#34d399',
-                                href: `https://wa.me/${SUPPORT_WHATSAPP}?text=${encodeURIComponent(msg)}`,
+                                href: `https://wa.me/${waDigits}?text=${encodeURIComponent(msg)}`,
                               },
-                              SUPPORT_EMAIL && {
-                                key: 'mail', label: 'Почта', hint: SUPPORT_EMAIL,
+                              contacts.email && {
+                                key: 'mail', label: 'Почта', hint: contacts.email,
                                 icon: Mail, color: '#a78bfa',
-                                href: `mailto:${SUPPORT_EMAIL}?subject=${encodeURIComponent('Сброс паспорта Ovora')}&body=${encodeURIComponent(msg)}`,
+                                href: `mailto:${contacts.email}?subject=${encodeURIComponent('Сброс паспорта Ovora')}&body=${encodeURIComponent(msg)}`,
                               },
                             ].filter(Boolean) as Array<{ key: string; label: string; hint: string; icon: typeof Mail; color: string; href: string }>;
 

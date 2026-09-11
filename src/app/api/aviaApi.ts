@@ -206,6 +206,20 @@ export async function loginAvia(phone: string, pin: string): Promise<AviaUser> {
   return data.user;
 }
 
+export interface AviaSupportContacts { telegram: string; whatsapp: string; email: string }
+
+/** Контакты поддержки — задаются в админке (AVIA → Настройки). Пустое поле = канал скрыт. */
+export async function getAviaSupportContacts(): Promise<AviaSupportContacts> {
+  const empty = { telegram: '', whatsapp: '', email: '' };
+  try {
+    const res = await fetch(`${BASE}/avia/support-contacts`, { headers: getHeaders() });
+    if (!res.ok) return empty;
+    return await res.json();
+  } catch {
+    return empty;
+  }
+}
+
 /** Получить профиль */
 export async function getAviaProfile(phone: string): Promise<AviaUser | null> {
   const clean = phone.replace(/\D/g, '');

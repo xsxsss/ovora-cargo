@@ -2186,5 +2186,22 @@ export function setupAviaRoutes(app: Hono, deps: AviaDeps): void {
     }
   });
 
+  // Контакты поддержки для приложения (замена паспорта и т.п.). Публичный, но
+  // отдаёт только контакты — комиссия и прочие настройки наружу не уходят.
+  // При ошибке возвращаем пустые значения: интерфейс просто скроет каналы.
+  app.get(`${P}/support-contacts`, async (c) => {
+    try {
+      const s = (await kv.get('ovora:avia-admin:settings') || {}) as Record<string, string>;
+      return c.json({
+        telegram: s.supportTelegram || '',
+        whatsapp: s.supportWhatsapp || '',
+        email   : s.supportEmail    || '',
+      });
+    } catch (err) {
+      console.log('Error GET /avia/support-contacts:', err);
+      return c.json({ telegram: '', whatsapp: '', email: '' });
+    }
+  });
+
   console.log('[AVIA] Routes registered. Architecture: Repository + Cache + RateLimit');
 }

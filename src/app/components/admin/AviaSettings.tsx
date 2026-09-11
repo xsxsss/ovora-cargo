@@ -11,6 +11,11 @@ const DEFAULTS = {
   platformName: 'Ovora AVIA',
   supportEmail: 'support@ovora.tj',
   supportPhone: '+992 92 000 0000',
+  // Каналы, которые видит пользователь при замене паспорта.
+  // Telegram — логин без «@». WhatsApp — только цифры с кодом страны.
+  // Пустое значение = канал не показывается.
+  supportTelegram: 'OvoraHelp',
+  supportWhatsapp: '',
   currency: 'TJS',
   language: 'ru',
   emailNotifications: true,
@@ -104,6 +109,8 @@ export function AviaSettings() {
               { id: 'platformName', label: 'Название платформы', type: 'text' },
               { id: 'supportEmail', label: 'Email поддержки', type: 'email' },
               { id: 'supportPhone', label: 'Телефон поддержки', type: 'tel' },
+              { id: 'supportTelegram', label: 'Telegram поддержки (логин без @)', type: 'text' },
+              { id: 'supportWhatsapp', label: 'WhatsApp поддержки (только цифры, напр. 992900112233)', type: 'tel' },
             ].map(f => (
               <div key={f.id}>
                 <Label htmlFor={f.id} className="text-sm">{f.label}</Label>
