@@ -50,14 +50,24 @@ function requireDriver() {
 }
 
 function requireAdmin() {
-  const isAuth = sessionStorage.getItem('isAuthenticated') === 'true' || (() => {
+  // Вход в CARGO (email + код) и вход в AVIA (телефон + PIN) пишут сессию в
+  // разные хранилища. Учитываем оба: админ может пользоваться только AVIA, и
+  // раньше его молча выбрасывало на главную.
+  // Настоящая проверка прав — код администратора в AdminAuthGate и на сервере;
+  // здесь лишь отсекаем случайный заход без входа в приложение.
+  const hasCargoSession = sessionStorage.getItem('isAuthenticated') === 'true' || (() => {
     try {
       const p = JSON.parse(localStorage.getItem('ovora_auth_persistent') || '{}');
       return !!(p.email && p.role);
     } catch { return false; }
   })();
-  if (!isAuth) return redirect('/');
-  // Admin PIN auth is handled by AdminLayout/AdminAuthGate — no token check here
+  const hasAviaSession = (() => {
+    try {
+      const s = JSON.parse(localStorage.getItem('ovora_avia_session') || '{}');
+      return !!s.phone;
+    } catch { return false; }
+  })();
+  if (!hasCargoSession && !hasAviaSession) return redirect('/');
   return null;
 }
 
