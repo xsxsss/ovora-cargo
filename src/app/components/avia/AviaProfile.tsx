@@ -601,7 +601,9 @@ function PassportCard({
   user, passportUrl, passportExpiry, manualExpiry, setManualExpiry,
   uploading, uploadSuccess, onConfirmUpload, onUpdateClick,
 }: PassportProps) {
-  const hasPassport = !!(user.passportPhoto || user.passportPhotoPath);
+  // См. AviaVerificationSheet: фото/путь доступны только владельцу с токеном,
+  // поэтому факт загрузки берём из passportVerified/passportUploadedAt.
+  const hasPassport = !!(user.passportPhoto || user.passportPhotoPath || user.passportVerified || user.passportUploadedAt);
   const exp = user.passportExpiryDate || passportExpiry;
   const isExpired = exp ? new Date(exp).getTime() < Date.now() : false;
   const [sheetOpen, setSheetOpen] = useState(false);
@@ -1690,7 +1692,9 @@ export function AviaProfile() {
 
   if (!user) return null;
 
-  const hasPassport = !!(user.passportPhoto || user.passportPhotoPath);
+  // См. AviaVerificationSheet: фото/путь доступны только владельцу с токеном,
+  // поэтому факт загрузки берём из passportVerified/passportUploadedAt.
+  const hasPassport = !!(user.passportPhoto || user.passportPhotoPath || user.passportVerified || user.passportUploadedAt);
   const isExpired = (() => {
     const exp = user.passportExpiryDate || passport.passportExpiry;
     return exp ? new Date(exp).getTime() < Date.now() : false;

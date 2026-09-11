@@ -84,7 +84,10 @@ export function AviaVerificationSheet({
   onConfirmUpload, onUpdateClick,
 }: VerificationSheetProps) {
 
-  const hasPassport = !!(user.passportPhoto || user.passportPhotoPath);
+  // Паспортные поля (фото/путь/номер) сервер отдаёт только владельцу, подтвердившему
+  // личность токеном. Факт загрузки определяем по passportVerified/passportUploadedAt —
+  // они приходят всегда, иначе интерфейс предложит загрузку уже загруженного паспорта.
+  const hasPassport = !!(user.passportPhoto || user.passportPhotoPath || user.passportVerified || user.passportUploadedAt);
   const exp = user.passportExpiryDate || passportExpiry;
   const isExpired = exp ? new Date(exp).getTime() < Date.now() : false;
   const [showPhoto, setShowPhoto] = useState(false);
