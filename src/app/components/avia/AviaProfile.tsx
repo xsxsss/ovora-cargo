@@ -1842,9 +1842,10 @@ export function AviaProfile() {
                 uploadSuccess={passport.uploadSuccess}
                 onConfirmUpload={(file, skipOcr) => passport.processPassportFile(file, skipOcr)}
                 onUpdateClick={() => {
+                  // Локально «забыть» паспорт нельзя: сервер всё равно откажет
+                  // («Паспорт уже загружен»). Сброс делает админ, а окно
+                  // верификации показывает контакты поддержки.
                   passport.resetUploadState();
-                  updateUserLocal({ passportPhoto: '', passportPhotoPath: '' }); // allow new upload
-                  // The sheet will be opened by clicking the card, so no need to auto-trigger click
                 }}
               />
             </motion.div>

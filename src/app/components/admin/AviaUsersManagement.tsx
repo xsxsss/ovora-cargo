@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import {
   Search, Plane, RefreshCw, Loader2, Download, Trash2, UserCheck, UserX,
-  ChevronDown, ChevronUp, MoreVertical, KeyRound, Pencil, ZoomIn, X,
+  ChevronDown, ChevronUp, MoreVertical, KeyRound, Pencil, ZoomIn, X, FileX,
 } from 'lucide-react';
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
@@ -10,6 +10,7 @@ import { toast } from 'sonner';
 import {
   getAviaAdminUsers, setAviaUserBlocked, deleteAviaAdminUser,
   resetAviaUserCode, updateAviaAdminUser, getAviaAdminPassportPhoto,
+  resetAviaUserPassport,
 } from '../../api/aviaAdminApi';
 import { getAviaPublicProfile, type AviaPublicProfile } from '../../api/aviaReviewApi';
 import { AdminPageHeader, HeaderBtn, FilterChips, SkeletonList } from './AdminPageHeader';
@@ -76,6 +77,22 @@ export function AviaUsersManagement() {
       toast.success(`Новый код для ${user.phone}: ${newPin}`, { duration: 15000 });
     } catch {
       toast.error('Ошибка сброса кода');
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  // Пользователь грузит паспорт один раз, поэтому заменить документ (истёк срок,
+  // плохое фото, новый паспорт) можно только отсюда.
+  const handleResetPassport = async (user: any) => {
+    if (!confirm(`Сбросить паспорт для ${user.phone}? Старый скан будет удалён, пользователь сможет загрузить документ заново.`)) return;
+    setActionLoading(user.phone);
+    try {
+      await resetAviaUserPassport(user.phone);
+      toast.success(`Паспорт сброшен — ${user.phone} может загрузить заново`);
+      await load();
+    } catch {
+      toast.error('Ошибка сброса паспорта');
     } finally {
       setActionLoading(null);
     }
@@ -267,6 +284,9 @@ export function AviaUsersManagement() {
                           </DropdownMenuItem>
                           <DropdownMenuItem onClick={() => handleResetCode(user)}>
                             <KeyRound className="w-4 h-4 mr-2" /> Сбросить код доступа
+                          </DropdownMenuItem>
+                          <DropdownMenuItem onClick={() => handleResetPassport(user)}>
+                            <FileX className="w-4 h-4 mr-2" /> Сбросить паспорт
                           </DropdownMenuItem>
                           {isBlocked ? (
                             <DropdownMenuItem onClick={() => handleBlock(user, false)} className="text-emerald-600">

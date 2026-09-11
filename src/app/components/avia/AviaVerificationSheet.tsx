@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { X, ShieldCheck, ShieldAlert, ShieldX, FileText, Camera, Lock, Eye, EyeOff, CheckCircle2, AlertCircle, CalendarX2, Loader2, MessageCircle, ChevronRight, Clock, Fingerprint, BadgeCheck, Upload, Zap, Database, Globe, ImageIcon, Trash2 } from 'lucide-react';
+import { X, ShieldCheck, ShieldAlert, ShieldX, FileText, Camera, Lock, Eye, EyeOff, CheckCircle2, AlertCircle, CalendarX2, Loader2, MessageCircle, ChevronRight, Clock, Fingerprint, BadgeCheck, Upload, Zap, Database, Globe, ImageIcon, Trash2, Mail, Phone } from 'lucide-react';
 import type { AviaUser } from '../../api/aviaApi';
 import { toast } from 'sonner';
 
@@ -20,6 +20,15 @@ const labelStyle: React.CSSProperties = {
   color: '#3d5a78', marginBottom: 6,
   letterSpacing: '0.06em', textTransform: 'uppercase',
 };
+
+// ─── Контакты поддержки ────────────────────────────────────────────────────────
+// Паспорт загружается один раз, сбросить его может только админ — поэтому
+// «Обновить паспорт» ведёт не к повторной загрузке, а к обращению в поддержку.
+// WHATSAPP_PHONE пуст → канал просто не показывается. Формат: только цифры,
+// с кодом страны, например '992900112233'.
+const SUPPORT_TELEGRAM = 'OvoraHelp';
+const SUPPORT_EMAIL    = 'support@ovora.tj';
+const SUPPORT_WHATSAPP = '';
 
 // ─── Status config ─────────────────────────────────────────────────────────────
 
@@ -95,6 +104,7 @@ export function AviaVerificationSheet({
   const [previewFile, setPreviewFile] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [previewKey, setPreviewKey] = useState(0);
+  const [showSupport, setShowSupport] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -960,10 +970,11 @@ export function AviaVerificationSheet({
                     )}
                   </AnimatePresence>
                   
-                  {/* Update passport button */}
+                  {/* Обновление паспорта — через поддержку: повторная загрузка
+                      закрыта на сервере, сбросить документ может только админ. */}
                   <motion.button
                     whileTap={{ scale: 0.97 }}
-                    onClick={onUpdateClick}
+                    onClick={() => { setShowSupport(v => !v); onUpdateClick?.(); }}
                     style={{
                       marginTop: 16, width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10,
                       padding: '16px', borderRadius: 16, cursor: 'pointer',
@@ -974,6 +985,83 @@ export function AviaVerificationSheet({
                     <Upload style={{ width: 16, height: 16 }} />
                     Обновить паспорт
                   </motion.button>
+
+                  <AnimatePresence>
+                    {showSupport && (
+                      <motion.div
+                        initial={{ opacity: 0, height: 0 }}
+                        animate={{ opacity: 1, height: 'auto' }}
+                        exit={{ opacity: 0, height: 0 }}
+                        transition={{ duration: 0.25 }}
+                        style={{ overflow: 'hidden' }}
+                      >
+                        <div style={{
+                          marginTop: 12, padding: '14px', borderRadius: 14,
+                          background: '#0ea5e908', border: '1px solid #0ea5e920',
+                        }}>
+                          <div style={{ fontSize: 12, color: '#8aa8c4', lineHeight: 1.6, marginBottom: 12 }}>
+                            Паспорт загружается один раз. Чтобы заменить документ, напишите
+                            в поддержку — мы сбросим его, и вы сможете загрузить новый.
+                          </div>
+
+                          {(() => {
+                            const msg = `Здравствуйте! Прошу сбросить паспорт для повторной загрузки. Мой номер в Ovora: +${user.phone}`;
+                            const channels = [
+                              SUPPORT_TELEGRAM && {
+                                key: 'tg', label: 'Telegram', hint: `@${SUPPORT_TELEGRAM}`,
+                                icon: MessageCircle, color: '#0ea5e9',
+                                href: `https://t.me/${SUPPORT_TELEGRAM}`,
+                              },
+                              SUPPORT_WHATSAPP && {
+                                key: 'wa', label: 'WhatsApp', hint: `+${SUPPORT_WHATSAPP}`,
+                                icon: Phone, color: '#34d399',
+                                href: `https://wa.me/${SUPPORT_WHATSAPP}?text=${encodeURIComponent(msg)}`,
+                              },
+                              SUPPORT_EMAIL && {
+                                key: 'mail', label: 'Почта', hint: SUPPORT_EMAIL,
+                                icon: Mail, color: '#a78bfa',
+                                href: `mailto:${SUPPORT_EMAIL}?subject=${encodeURIComponent('Сброс паспорта Ovora')}&body=${encodeURIComponent(msg)}`,
+                              },
+                            ].filter(Boolean) as Array<{ key: string; label: string; hint: string; icon: typeof Mail; color: string; href: string }>;
+
+                            return (
+                              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                                {channels.map(ch => {
+                                  const Icon = ch.icon;
+                                  return (
+                                    <motion.button
+                                      key={ch.key}
+                                      whileTap={{ scale: 0.97 }}
+                                      onClick={() => window.open(ch.href, '_blank', 'noopener,noreferrer')}
+                                      style={{
+                                        width: '100%', display: 'flex', alignItems: 'center', gap: 12,
+                                        padding: '12px 14px', borderRadius: 12, cursor: 'pointer',
+                                        background: `${ch.color}0d`, border: `1px solid ${ch.color}28`,
+                                        textAlign: 'left',
+                                      }}
+                                    >
+                                      <div style={{
+                                        width: 34, height: 34, borderRadius: 10, flexShrink: 0,
+                                        background: `${ch.color}18`,
+                                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                      }}>
+                                        <Icon style={{ width: 16, height: 16, color: ch.color }} />
+                                      </div>
+                                      <div style={{ flex: 1 }}>
+                                        <div style={{ fontSize: 13, fontWeight: 700, color: '#ddeeff' }}>{ch.label}</div>
+                                        <div style={{ fontSize: 11, color: '#4a6a88', marginTop: 1 }}>{ch.hint}</div>
+                                      </div>
+                                      <ChevronRight style={{ width: 15, height: 15, color: `${ch.color}66` }} />
+                                    </motion.button>
+                                  );
+                                })}
+                              </div>
+                            );
+                          })()}
+                        </div>
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
                 </>
               )}
 

@@ -2004,6 +2004,42 @@ export function setupAviaRoutes(app: Hono, deps: AviaDeps): void {
     }
   });
 
+  // Сброс паспорта: загрузка разрешена один раз, поэтому заменить документ
+  // (истёк срок, ошибка при съёмке, новый паспорт) может только админ.
+  app.post(`${P}/admin/users/:phone/reset-passport`, async (c) => {
+    try {
+      const phone = aviaClean(decodeURIComponent(c.req.param('phone')));
+      const existing = await Users.get(phone);
+      if (!existing) return c.json({ error: 'AVIA user not found' }, 404);
+
+      // Старый скан больше не нужен и содержит ПДн — удаляем из хранилища.
+      if (existing.passportPhotoPath) {
+        try {
+          await supabase.storage.from(AVIA_PASSPORT_BUCKET).remove([existing.passportPhotoPath]);
+        } catch (rmErr) {
+          console.warn('[AVIA] Не удалось удалить старый скан паспорта:', rmErr);
+        }
+      }
+
+      const updated = await Users.update(phone, {
+        passportPhoto      : '',
+        passportPhotoPath  : '',
+        passportNumber     : '',
+        passportUploadedAt : '',
+        passportExpiryDate : '',
+        passportVerified   : false,
+        passportExpired    : false,
+      });
+
+      await AuditLog.record({ action: 'user.admin_reset_passport', actorPhone: 'admin', targetId: phone, targetType: 'user' });
+      console.log(`[AVIA] Паспорт сброшен админом для ${phone}`);
+      return c.json({ success: true, user: updated });
+    } catch (err) {
+      console.log('Error POST /avia/admin/users/:phone/reset-passport:', err);
+      return c.json({ error: 'Внутренняя ошибка сервера' }, 500);
+    }
+  });
+
   app.get(`${P}/admin/deals`, async (c) => {
     try {
       let deals = await Deals.listAll();

@@ -39,6 +39,11 @@ export async function resetAviaUserCode(phone: string): Promise<{ success: boole
   return req('POST', `/users/${encodeURIComponent(phone)}/reset-code`);
 }
 
+/** Сброс паспорта: пользователь грузит документ один раз, заменить может только админ. */
+export async function resetAviaUserPassport(phone: string): Promise<{ success: boolean; user: any }> {
+  return req('POST', `/users/${encodeURIComponent(phone)}/reset-passport`);
+}
+
 export async function getAviaAdminDeals(filter?: { status?: string; phone?: string; dealType?: string }) {
   const params = new URLSearchParams();
   if (filter?.status)   params.set('status', filter.status);
