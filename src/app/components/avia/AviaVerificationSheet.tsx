@@ -133,7 +133,7 @@ export function AviaVerificationSheet({
     {
       icon: BadgeCheck,
       label: 'Тип документа',
-      value: hasPassport ? 'Внутренний паспорт РФ' : '—',
+      value: hasPassport ? 'Паспорт' : '—',
       color: '#0ea5e9',
     },
     {
@@ -284,7 +284,7 @@ export function AviaVerificationSheet({
                   Верификация паспорта
                 </div>
                 <div style={{ fontSize: 11, color: '#3d5a78', marginTop: 2 }}>
-                  Внутренний паспорт РФ · OCR
+                  Паспорт · OCR-верификация
                 </div>
               </div>
 
@@ -729,35 +729,20 @@ export function AviaVerificationSheet({
                             </div>
                           </div>
 
-                          {/* Preview actions */}
-                          <div style={{ display: 'flex', gap: 8, padding: '12px 14px' }}>
+                          {/* Действие превью — заменить файл. Загрузка идёт единой кнопкой ниже. */}
+                          <div style={{ padding: '12px 14px' }}>
                             <motion.button
                               whileTap={{ scale: 0.95 }}
                               onClick={(e) => { e.stopPropagation(); setPreviewFile(null); }}
                               style={{
-                                flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+                                width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
                                 padding: '10px', borderRadius: 11, cursor: 'pointer',
                                 background: '#ffffff08', border: '1px solid #ffffff12',
                                 color: '#6b8faa', fontSize: 12, fontWeight: 700,
                               }}
                             >
                               <Trash2 style={{ width: 13, height: 13 }} />
-                              Удалить
-                            </motion.button>
-                            <motion.button
-                              whileTap={{ scale: 0.95 }}
-                              onClick={(e) => { e.stopPropagation(); onConfirmUpload(previewFile, false); }}
-                              style={{
-                                flex: 2, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
-                                padding: '10px', borderRadius: 11, cursor: 'pointer',
-                                background: 'linear-gradient(135deg, #78350f, #f59e0b)',
-                                border: 'none',
-                                color: '#fff', fontSize: 12, fontWeight: 800,
-                                boxShadow: '0 4px 16px #f59e0b22',
-                              }}
-                            >
-                              <Upload style={{ width: 13, height: 13 }} />
-                              Загрузить и распознать
+                              Выбрать другое фото
                             </motion.button>
                           </div>
                         </motion.div>
@@ -818,16 +803,12 @@ export function AviaVerificationSheet({
                     </div>
                   </div>
 
-                  {/* ── Main CTA ── */}
+                  {/* ── Main CTA — появляется только после выбора фото (в пустом
+                       состоянии единственная точка загрузки — drop-зона выше) ── */}
+                  {(previewFile || uploading) && (
                   <motion.button
                     whileTap={!uploading ? { scale: 0.97 } : {}}
-                    onClick={() => {
-                      if (previewFile) {
-                        onConfirmUpload(previewFile, false);
-                      } else {
-                        fileInputRef.current?.click();
-                      }
-                    }}
+                    onClick={() => { if (previewFile && !uploading) onConfirmUpload(previewFile, false); }}
                     disabled={uploading}
                     style={{
                       width: '100%', padding: 0,
@@ -856,12 +837,12 @@ export function AviaVerificationSheet({
                       {/* Text */}
                       <div style={{ flex: 1, textAlign: 'left' }}>
                         <div style={{ fontSize: 16, fontWeight: 900, color: '#fff', letterSpacing: '-0.3px' }}>
-                          {uploading ? 'Загрузка и распознавание...' : 'Загрузить фото паспорта'}
+                          {uploading ? 'Загрузка и распознавание...' : 'Загрузить и распознать'}
                         </div>
                         <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.6)', marginTop: 4 }}>
                           {uploading
                             ? 'OCR анализирует документ, подождите'
-                            : 'Камера или галерея · Внутренний паспорт РФ · Один раз'
+                            : 'OCR распознает данные и заполнит профиль'
                           }
                         </div>
                       </div>
@@ -886,6 +867,7 @@ export function AviaVerificationSheet({
                       />
                     )}
                   </motion.button>
+                  )}
 
                   {/* ── Fallback CTA ── */}
                   {!uploading && previewFile && (
