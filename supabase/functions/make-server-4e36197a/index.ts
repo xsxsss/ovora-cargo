@@ -3508,59 +3508,67 @@ function parseDocumentText(text: string, documentType: string): {
   }
 
   // ══════════════════════════════════════════════════════════════
-  // 🔍 MRZ ПАРСИНГ — более гибкий: допускаем пробелы и мелкие искажения
-  // Таджикский паспорт: P<TJK... / Российский паспорт: P<RUS...
+  // 🔍 MRZ ПАРСИНГ (ICAO 9303, TD3 — загранпаспорт ЛЮБОЙ страны)
+  // Две строки. Строка 1: P<CCC<ФАМИЛИЯ<<ИМЕНА (CCC — код страны, 1-3 симв).
+  // Строка 2 (44 симв): номер(9)+чек+гражданство(3)+ДР(6)+чек+пол+срок(6)+...
+  // Позиции фиксированы стандартом → работают одинаково для всех стран.
+  // Пробелы/искажения OCR нормализуем, берём позиционно.
   // ══════════════════════════════════════════════════════════════
-  const mrzLines = lines.filter(line => {
-    const clean = line.replace(/\s/g, '');
-    // МРЗ: >=20 символов, >=70% символов из набора A-Z0-9< (снижен порог для OCR-артефактов)
-    const mrzChars = (clean.match(/[A-Z0-9<]/g) || []).length;
-    return clean.length >= 20 && mrzChars / clean.length >= 0.70;
-  });
-  console.log('[Parser] Found', mrzLines.length, 'potential MRZ lines:', mrzLines);
-  
-  for (const mrzLine of mrzLines) {
-    const clean = mrzLine.replace(/\s/g, '').toUpperCase();
+  function mrzYYMMDDtoDMY(s: string, isExpiry: boolean): string | null {
+    if (!/^\d{6}$/.test(s)) return null;
+    const yy = parseInt(s.substring(0, 2), 10);
+    const mm = s.substring(2, 4);
+    const dd = s.substring(4, 6);
+    const mi = parseInt(mm, 10), di = parseInt(dd, 10);
+    if (mi < 1 || mi > 12 || di < 1 || di > 31) return null;
+    // Срок действия всегда 20YY. Дата рождения: >30 → 19YY, иначе 20YY.
+    const year = isExpiry ? 2000 + yy : (yy > 30 ? 1900 + yy : 2000 + yy);
+    return `${dd}.${mm}.${year}`;
+  }
 
-    // Строка 1: P<TJK / P<RUS + имена через <<
-    if (/^P.{1}[A-Z]{3}/.test(clean) && clean.length >= 25) {
-      const nameSection = clean.substring(5); // after P<XXX
-      const doubleChevronIdx = nameSection.indexOf('<<');
-      if (doubleChevronIdx > 0) {
-        const rawLast = nameSection.substring(0, doubleChevronIdx).replace(/</g, ' ').trim();
-        const afterLast = nameSection.substring(doubleChevronIdx + 2);
-        // Имя и отчество разделены одним <
-        const nameParts = afterLast.split('<').filter(p => p.length > 1);
-        if (rawLast && rawLast.length > 1 && !lastName) {
-          lastName = rawLast;
-          console.log('[Parser] MRZ lastName:', lastName);
-        }
-        if (nameParts.length > 0 && !firstName) {
-          firstName = nameParts[0];
-          console.log('[Parser] MRZ firstName:', firstName);
-        }
-        if (nameParts.length > 1 && !patronymic) {
-          patronymic = nameParts[1];
-          console.log('[Parser] MRZ patronymic:', patronymic);
-        }
-      }
+  const mrzCandidates = lines
+    .map(l => l.replace(/\s/g, '').toUpperCase())
+    .filter(clean => {
+      const mrzChars = (clean.match(/[A-Z0-9<]/g) || []).length;
+      return clean.length >= 20 && mrzChars / clean.length >= 0.70;
+    });
+  console.log('[Parser] MRZ candidate lines:', mrzCandidates);
+
+  const MRZ_LINE1_RX = /^P[A-Z<][A-Z<]{3}/;
+  const mrzLine1 = mrzCandidates.find(l => MRZ_LINE1_RX.test(l));
+  // Строка 2 — MRZ-строка, отличная от первой, с датой (номер может начинаться с буквы!)
+  const mrzLine2 = mrzCandidates.find(l => l !== mrzLine1 && /\d{6}/.test(l) && !MRZ_LINE1_RX.test(l));
+
+  // ── Строка 1: страна выдачи + ФИО ──────────────────────────────
+  if (mrzLine1) {
+    const issuingCountry = mrzLine1.substring(2, 5).replace(/</g, '');
+    if (issuingCountry) console.log('[Parser] MRZ issuing country:', issuingCountry);
+    const nameSection = mrzLine1.substring(5);
+    const dcIdx = nameSection.indexOf('<<');
+    if (dcIdx > 0) {
+      const rawLast = nameSection.substring(0, dcIdx).replace(/</g, ' ').trim();
+      const nameParts = nameSection.substring(dcIdx + 2).split('<').filter(p => p.length > 1);
+      if (rawLast.length > 1 && !lastName) { lastName = rawLast; console.log('[Parser] MRZ lastName:', lastName); }
+      if (nameParts.length > 0 && !firstName) { firstName = nameParts[0]; console.log('[Parser] MRZ firstName:', firstName); }
+      if (nameParts.length > 1 && !patronymic) { patronymic = nameParts[1]; console.log('[Parser] MRZ patronymic:', patronymic); }
     }
+  }
 
-    // Строка 2: дата рождения на позиции 13-18 (YYMMDD формат)
-    if (/^\d/.test(clean) && clean.length >= 28) {
-      // Пробуем стандартную позицию ИКАО
-      const dobMatch = clean.match(/^.{13}(\d{6})/);
-      if (dobMatch && !birthDate) {
-        const yy = parseInt(dobMatch[1].substring(0, 2));
-        const mm = dobMatch[1].substring(2, 4);
-        const dd = dobMatch[1].substring(4, 6);
-        const year = yy > 30 ? 1900 + yy : 2000 + yy;
-        // Базовая санити-проверка
-        if (parseInt(mm) >= 1 && parseInt(mm) <= 12 && parseInt(dd) >= 1 && parseInt(dd) <= 31) {
-          birthDate = `${dd}.${mm}.${year}`;
-          console.log('[Parser] MRZ birthDate:', birthDate);
-        }
-      }
+  // ── Строка 2: номер паспорта, гражданство, дата рождения, срок ──
+  if (mrzLine2 && mrzLine2.length >= 28) {
+    if (!documentNumber) {
+      const rawNum = mrzLine2.substring(0, 9).split('<')[0].replace(/[^A-Z0-9]/g, '');
+      if (rawNum.length >= 5) { documentNumber = rawNum; console.log('[Parser] MRZ passport №:', documentNumber); }
+    }
+    const nat = mrzLine2.substring(10, 13).replace(/</g, '');
+    if (nat) console.log('[Parser] MRZ nationality:', nat);
+    if (!birthDate) {
+      const dob = mrzYYMMDDtoDMY(mrzLine2.substring(13, 19), false);
+      if (dob) { birthDate = dob; console.log('[Parser] MRZ birthDate:', birthDate); }
+    }
+    if (!expiryDate) {
+      const exp = mrzYYMMDDtoDMY(mrzLine2.substring(21, 27), true);
+      if (exp) { expiryDate = exp; console.log('[Parser] MRZ expiryDate:', expiryDate); }
     }
   }
 

@@ -425,7 +425,14 @@ export function setupAviaRoutes(app: Hono, deps: AviaDeps): void {
           const ocrResult   = await extractDocumentData(base64Image, 'passport');
           console.log('[AVIA] OCR result:', JSON.stringify(ocrResult));
 
-          ocrExpiryDate = ocrResult.expiryDate || null;
+          // OCR отдаёт срок в DD.MM.YYYY — приводим к ISO (YYYY-MM-DD), иначе
+          // new Date(finalExpiry) ниже вернёт Invalid Date и isExpired всегда = false.
+          if (ocrResult.expiryDate) {
+            const ep = ocrResult.expiryDate.split(/[.\/-]/);
+            ocrExpiryDate = (ep.length === 3 && ep[2]?.length === 4)
+              ? `${ep[2]}-${ep[1].padStart(2, '0')}-${ep[0].padStart(2, '0')}`
+              : ocrResult.expiryDate;
+          }
           ocrFullName   = ocrResult.fullName || null;
 
           if (ocrFullName && !existing.firstName) {
