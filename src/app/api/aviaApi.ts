@@ -1,5 +1,6 @@
 import { projectId, publicAnonKey } from '../../../utils/supabase/info';
 import { CSRF_HEADER, CSRF_TOKEN } from './csrfToken';
+import { claimCacheOwner, releaseCacheOwner } from './sessionScope';
 
 const BASE = `https://${projectId}.supabase.co/functions/v1/make-server-4e36197a`;
 const BASE_HEADERS = {
@@ -122,10 +123,15 @@ export function getAviaSession(): { phone: string; user: AviaUser; token?: strin
 
 /** token не передан → сохраняем токен текущей сессии (используется при обновлении профиля/аватара) */
 export function saveAviaSession(phone: string, user: AviaUser, token?: string): void {
+  // Токен читаем ДО claimCacheOwner — тот может стереть старую сессию.
+  const carriedToken = token ?? getAviaSession()?.token;
+  // Закрепляем устройство за этим номером: если раньше здесь был другой
+  // аккаунт, его кеш стирается — см. sessionScope.
+  claimCacheOwner(`avia:${phone}`);
   const data: AviaSessionData = {
     phone,
     user,
-    token: token ?? getAviaSession()?.token,
+    token: carriedToken,
     expiresAt: Date.now() + SESSION_TTL_MS,
   };
   localStorage.setItem(AVIA_SESSION_KEY, JSON.stringify(data));
@@ -133,6 +139,7 @@ export function saveAviaSession(phone: string, user: AviaUser, token?: string): 
 
 export function clearAviaSession(): void {
   localStorage.removeItem(AVIA_SESSION_KEY);
+  releaseCacheOwner();
 }
 
 /** Продлить TTL сессии при активном использовании (вызывать при логине) */

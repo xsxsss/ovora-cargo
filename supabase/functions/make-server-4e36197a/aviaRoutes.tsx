@@ -26,6 +26,7 @@ import { AuditLog } from "./aviaAudit.tsx";
 import * as kv from "./kv_store.tsx";
 import { Blacklist } from "./blacklist.tsx";
 import { signAviaToken, verifyAviaActor } from "./aviaAuth.tsx";
+import { recordLoginDevice, getLoginDevices } from "./deviceInfo.tsx";
 
 // ── Константы ────────────────────────────────────────────────────────────────
 const BCRYPT_ROUNDS          = 10;
@@ -180,6 +181,8 @@ export function setupAviaRoutes(app: Hono, deps: AviaDeps): void {
       await Pins.set(clean, { ...pinData, attempts: 0 });
       const user = await Users.update(clean, { lastLoginAt: new Date().toISOString() });
       await AuditLog.record({ action: 'user.login', actorPhone: clean, targetId: clean, targetType: 'user' });
+      // Запоминаем, с какого телефона и браузера зашли — видно в админке.
+      await recordLoginDevice('avia', clean, c);
 
       console.log(`[AVIA] Login success: ${clean}`);
       const token = await signAviaToken(clean);
@@ -1991,6 +1994,20 @@ export function setupAviaRoutes(app: Hono, deps: AviaDeps): void {
       return c.json({ success: true, blacklisted: true });
     } catch (err) {
       console.log('Error DELETE /avia/admin/users/:phone:', err);
+      return c.json({ error: 'Внутренняя ошибка сервера' }, 500);
+    }
+  });
+
+  // ── Устройства входа пользователя AVIA ────────────────────────────────────
+  // С какого телефона и браузера человек заходит — для разбора проблем со
+  // входом. Персональные данные, маршрут внутри /avia/admin/*.
+  app.get(`${P}/admin/users/:phone/devices`, async (c) => {
+    try {
+      const phone = aviaClean(decodeURIComponent(c.req.param('phone')));
+      const log = await getLoginDevices('avia', phone);
+      return c.json({ success: true, ...log });
+    } catch (err) {
+      console.log('Error GET /avia/admin/users/:phone/devices:', err);
       return c.json({ error: 'Внутренняя ошибка сервера' }, 500);
     }
   });

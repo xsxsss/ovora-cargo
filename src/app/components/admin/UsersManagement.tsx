@@ -5,7 +5,8 @@ import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
 } from '../ui/dropdown-menu';
 import { toast } from 'sonner';
-import { getAdminUsers, adminHeaders } from '../../api/dataApi';
+import { getAdminUsers, adminHeaders, getUserDevices } from '../../api/dataApi';
+import { LoginDevices } from './LoginDevices';
 import { projectId } from '../../../../utils/supabase/info';
 import { AdminPageHeader, HeaderBtn, FilterChips, SkeletonList, Pagination } from './AdminPageHeader';
 import { exportCsv } from '../../utils/adminCsvExport';
@@ -450,6 +451,9 @@ export function UsersManagement() {
                           <p className="text-sm text-gray-900 break-all">{f.value}</p>
                         </div>
                       ))}
+                      <div className="col-span-2 md:col-span-4 pt-2" style={{ borderTop: '1px solid #e2e8f0' }}>
+                        <LoginDevices load={() => getUserDevices(user.email)} />
+                      </div>
                       {user.vehicle && (
                         <div className="col-span-2">
                           <p className="text-[11px] font-semibold text-gray-400 uppercase tracking-wide mb-1">Транспорт</p>

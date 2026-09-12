@@ -13,6 +13,8 @@ import {
   resetAviaUserPassport,
 } from '../../api/aviaAdminApi';
 import { getAviaPublicProfile, type AviaPublicProfile } from '../../api/aviaReviewApi';
+import { getAviaUserDevices } from '../../api/aviaAdminApi';
+import { LoginDevices } from './LoginDevices';
 import { AdminPageHeader, HeaderBtn, FilterChips, SkeletonList } from './AdminPageHeader';
 import { exportCsv } from '../../utils/adminCsvExport';
 import { RelTime } from './RelTime';
@@ -363,6 +365,9 @@ export function AviaUsersManagement() {
                         ) : (
                           <p className="text-sm text-gray-400">Нет данных</p>
                         )}
+                      </div>
+                      <div className="col-span-2 md:col-span-4 pt-2" style={{ borderTop: '1px solid #e2e8f0' }}>
+                        <LoginDevices load={() => getAviaUserDevices(user.phone)} />
                       </div>
                     </div>
                   )}

@@ -557,6 +557,13 @@ export async function updateAdminDocStatus(documentId: string, userEmail: string
   return data;
 }
 
+// ── Устройства входа пользователя ──────────────────────────────────
+/** С какого телефона и браузера человек заходит — для разбора проблем со входом. */
+export async function getUserDevices(email: string): Promise<{ current: any | null; history: any[] }> {
+  const data = await req('GET', `/admin/users/${encodeURIComponent(email)}/devices`);
+  return { current: data.current || null, history: data.history || [] };
+}
+
 // ── Admin audit log ───────────────────────────────────────────────
 export async function getAdminAudit(filter?: {
   actorEmail?: string; targetId?: string; action?: string; limit?: number; offset?: number;

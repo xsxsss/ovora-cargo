@@ -20,6 +20,8 @@ import * as kv from "./kv_store.tsx";
 import { Blacklist } from "./blacklist.tsx";
 import { AuditLog as CargoAuditLog } from "./cargoAudit.tsx";
 import { AuditLog as AviaAuditLog } from "./aviaAudit.tsx";
+import { syncAuthIdentity, buildDisplayName } from "./authIdentity.tsx";
+import { getLoginDevices } from "./deviceInfo.tsx";
 import { handleSendOtp, handleVerifyOtp } from "./otp.tsx";
 import { handleGenerateBackup, handleVerifyBackup, handleBackupExists } from "./backup.tsx";
 import { handleEmailCheck, handleSetCode, handleVerifyPermCode, handleResetCode, handleAdminListCodes, handleSendEmailCode, handleVerifyEmailCode } from "./permCode.tsx";
@@ -818,6 +820,15 @@ app.post("/make-server-4e36197a/auth/register",
       })().catch(e => console.warn('[Email] welcome failed:', e));
     }
 
+    // Досылаем имя и телефон в карточку Supabase Auth — иначе в дашборде
+    // Display name и Phone остаются пустыми (в Auth уходил только email).
+    syncAuthIdentity(user.email, {
+      displayName: buildDisplayName(user),
+      phone      : user.phone,
+      role       : user.role,
+      platform   : 'cargo',
+    }).catch(e => console.warn('[AuthIdentity] register sync failed:', e));
+
     return c.json({ success: true, user });
   } catch (err) {
     console.log("Error /auth/register:", err);
@@ -898,6 +909,14 @@ app.put("/make-server-4e36197a/auth/user", async (c) => {
     await kv.set(key, updated);
     const newPhone = updated.phone?.replace(/\D/g, "");
     if (newPhone?.length >= 7) await kv.set(`ovora:user:phone:${newPhone}`, existing.email);
+
+    // Профиль поменялся — обновляем карточку в Supabase Auth.
+    syncAuthIdentity(updated.email, {
+      displayName: buildDisplayName(updated),
+      phone      : updated.phone,
+      role       : updated.role,
+      platform   : 'cargo',
+    }).catch(e => console.warn('[AuthIdentity] profile sync failed:', e));
 
     // Return safe user (never expose codeHash or passportNumber)
     const { codeHash: _ch, passportNumber: _pn, passportData: _pd, ...safeUser } = updated;
@@ -5352,6 +5371,21 @@ app.put("/make-server-4e36197a/admin/settings", async (c) => {
 });
 
 // ✅ Admin: block/unblock user
+// ── Устройства входа пользователя CARGO ──────────────────────────────────────
+// Показывает, с какого телефона и браузера человек заходит: помогает разбирать
+// жалобы «не открывается сайт» и видно, если в аккаунт заходят с разных мест.
+// Персональные данные — только под админом (маршрут внутри /admin/*).
+app.get("/make-server-4e36197a/admin/users/:email/devices", async (c) => {
+  try {
+    const email = decodeURIComponent(c.req.param("email")).toLowerCase().trim();
+    const log = await getLoginDevices('cargo', email);
+    return c.json({ success: true, ...log });
+  } catch (err) {
+    console.log("Error GET /admin/users/:email/devices:", err);
+    return c.json({ error: 'Внутренняя ошибка сервера' }, 500);
+  }
+});
+
 app.put("/make-server-4e36197a/admin/users/:email/status", async (c) => {
   try {
     const email = decodeURIComponent(c.req.param("email"));

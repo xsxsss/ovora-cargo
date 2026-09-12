@@ -1,6 +1,7 @@
 import { projectId, publicAnonKey } from '../../../utils/supabase/info';
 import { cacheClear as clearApiCache, adminHeaders } from './dataApi';
 import { CSRF_HEADER, CSRF_TOKEN } from './csrfToken';
+import { claimCacheOwner, releaseCacheOwner } from './sessionScope';
 
 // authApi v2 - with getCachedUser export
 const BASE = `https://${projectId}.supabase.co/functions/v1/make-server-4e36197a`;
@@ -164,8 +165,9 @@ export async function registerUser(user: Partial<OvoraUser>): Promise<OvoraUser>
   const data = await res.json();
   if (data.error) throw new Error(data.error);
   
-  // ✅ Чистим данные предыдущего пользователя перед сохранением нового
+  // Чистим данные предыдущего пользователя перед сохранением нового
   clearPreviousUserCache(data.user.email);
+  claimCacheOwner(`cargo:${data.user.email}`);
   saveUserSession(data.user.email, data.user.role);
   localStorage.setItem(CURRENT_USER_KEY, JSON.stringify(data.user));
   
@@ -199,6 +201,9 @@ export async function findUserByPhone(phone: string): Promise<OvoraUser | null> 
 export function loginUser(user: OvoraUser) {
   const prevEmail = sessionStorage.getItem(USER_EMAIL_KEY);
   clearPreviousUserCache(user.email);
+  // Закрепляем устройство за этим аккаунтом: если раньше здесь был другой
+  // человек, его кеш (чаты, сообщения, поездки) стирается — см. sessionScope.
+  claimCacheOwner(`cargo:${user.email}`);
   // Сбрасываем in-memory кэш dataApi при смене пользователя
   if (prevEmail && prevEmail.toLowerCase() !== user.email.toLowerCase()) {
     clearApiCache();
@@ -226,6 +231,7 @@ export async function updateUser(updates: Partial<OvoraUser> & { email: string }
 }
 
 export function logoutUser() {
+  releaseCacheOwner();
   clearUserSession();
   localStorage.removeItem(CURRENT_USER_KEY);
   try { localStorage.removeItem(USER_TOKEN_KEY); } catch { /* ignore */ }
@@ -276,6 +282,9 @@ export async function verifyPermCode(email: string, code: string): Promise<void>
   });
   const data = await res.json();
   if (!res.ok || !data.success) throw new Error(data.error || 'Неверный код доступа');
+  // Вход подтверждён — закрепляем устройство за этим аккаунтом ДО записи
+  // токена: чужой кеш стирается, свежий токен остаётся.
+  claimCacheOwner(`cargo:${email.trim().toLowerCase()}`);
   // Сохраняем сессионный токен (если бэкенд настроен с USER_JWT_SECRET; иначе undefined).
   if (data.token) {
     try { localStorage.setItem(USER_TOKEN_KEY, data.token); } catch { /* ignore */ }

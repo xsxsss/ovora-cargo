@@ -13,6 +13,8 @@ import type { Context } from "npm:hono";
 import * as kv from "./kv_store.tsx";
 import * as bcrypt from "npm:bcryptjs";
 import { signUserToken } from "./userAuth.tsx";
+import { rememberAuthUserId } from "./authIdentity.tsx";
+import { recordLoginDevice } from "./deviceInfo.tsx";
 
 const MAX_ATTEMPTS = 10;
 const BCRYPT_ROUNDS = 12; // Высокий cost-фактор = медленный брутфорс
@@ -176,6 +178,13 @@ export async function handleVerifyEmailCode(c: Context) {
       return c.json({ success: false, error: msg });
     }
 
+    // GoTrue вернул сессию — из неё забираем id пользователя в Auth, чтобы
+    // потом дописать ему имя и телефон без поиска по всей таблице.
+    try {
+      const session: any = await res.json();
+      await rememberAuthUserId(email, session?.user?.id);
+    } catch { /* тело ответа не обязательно — не критично */ }
+
     // Почта подтверждена — выдаём короткоживущий флаг, его требует set-code.
     await kv.set(emailVerifiedKey(email), { email, until: Date.now() + VERIFIED_TTL_MS });
 
@@ -287,6 +296,8 @@ export async function handleVerifyPermCode(c: Context) {
 
     await kv.set(permKey(email), { ...stored, attempts: 0, lastUsed: new Date().toISOString() });
     console.log(`[PermCode] ✅ Code verified for ${email}`);
+    // Запоминаем, с какого телефона и браузера зашли — видно в админке.
+    await recordLoginDevice('cargo', email, c);
     // Код подтверждён — выдаём сессионный токен (undefined, если USER_JWT_SECRET не настроен).
     const token = await signUserToken(email);
     return c.json({ success: true, token });

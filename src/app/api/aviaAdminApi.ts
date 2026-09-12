@@ -44,6 +44,12 @@ export async function resetAviaUserPassport(phone: string): Promise<{ success: b
   return req('POST', `/users/${encodeURIComponent(phone)}/reset-passport`);
 }
 
+/** С какого телефона и браузера человек заходит — для разбора проблем со входом. */
+export async function getAviaUserDevices(phone: string): Promise<{ current: any | null; history: any[] }> {
+  const data = await req('GET', `/users/${encodeURIComponent(phone)}/devices`);
+  return { current: data.current || null, history: data.history || [] };
+}
+
 export async function getAviaAdminDeals(filter?: { status?: string; phone?: string; dealType?: string }) {
   const params = new URLSearchParams();
   if (filter?.status)   params.set('status', filter.status);

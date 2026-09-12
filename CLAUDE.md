@@ -149,6 +149,8 @@ X-Admin-Token: <jwt>          // payload: { role: 'super-admin' | 'cargo-admin' 
 | `ADMIN_ACCESS_CODE_AVIA` | Пароль для роли `avia-admin` (опционально, RBAC) |
 | `ADMIN_JWT_SECRET` | Секрет для подписи JWT токенов (минимум 32 символа) |
 | `AVIA_JWT_SECRET` | Секрет для подписи AVIA session-токенов (`X-Avia-Token`, минимум 32 символа) |
+| `SUPABASE_ANON_KEY` | Anon key — нужен для вызова GoTrue (`/auth/v1/otp`, `/auth/v1/verify`) из бэкенда |
+| `USER_JWT_SECRET` | Секрет для подписи CARGO session-токенов (`X-User-Token`, минимум 32 символа) |
 | `YANDEX_GEOCODER_API_KEY` | Yandex Geocoder API |
 | `OCR_SPACE_API_KEY` | OCR.space для распознавания документов |
 
@@ -222,6 +224,51 @@ npm run build       # сборка через Vite/esbuild — не делает
 
 ---
 
+## Журнал админки — кто что делал
+
+Два журнала, по одному на площадку: `cargoAudit.tsx` (`ovora:cargo-audit:*`) и
+`aviaAudit.tsx` (`ovora:avia-audit:*`). В главной админке они собраны в папку
+«Аудит»; сотрудник площадки видит в ней только свой журнал.
+
+- Актор админских записей — `admin:<роль>`, роль берётся из проверенного токена
+  (`adminActor(c)` в `index.ts` и `aviaRoutes.tsx`). Просто `admin` писать нельзя —
+  по такой записи не отличить директора от сотрудника.
+- `adminActor(c)` попутно ставит `c.set('auditLogged', true)`. Вызывать его
+  **только** внутри `AuditLog.record(...)` — иначе сквозной журнал решит, что
+  запрос уже записан, и пропустит его.
+- Сквозной журнал (`auditFallback` в `index.ts`) пишет `admin.request` для любого
+  POST/PUT/PATCH/DELETE к `/admin/*` и `/avia/admin/*`, который обработчик не
+  залогировал подробно. Новый раздел админки нельзя забыть залогировать.
+- Вход в админку — `admin.login` (в самом `/admin/auth`), с IP и user-agent,
+  включая неудачные попытки подбора кода.
+
+## Данные о человеке и устройстве
+
+- `authIdentity.tsx` — дописывает в карточку Supabase Auth (Authentication → Users)
+  Display name и Phone через Admin API. Без этого в дашборде они пустые: в GoTrue
+  уходит только email. Вызывается из `/auth/register` и `PUT /auth/user`.
+  id пользователя в Auth запоминается в KV (`ovora:auth_uid:<email>`) при проверке
+  кода из письма — чтобы не искать его по всей таблице.
+- `deviceInfo.tsx` — разбирает User-Agent (браузер, ОС, модель телефона) и хранит
+  последние 5 входов в `ovora:device:<platform>:<id>`. Пишется при входе CARGO
+  (`verify-perm-code`) и AVIA (`/avia/login`), читается в админке
+  (`GET /admin/users/:email/devices`, `GET /avia/admin/users/:phone/devices`).
+  Это персональные данные — наружу не отдаются.
+
+## Кеш привязан к аккаунту
+
+`src/app/api/sessionScope.ts` — `claimCacheOwner('cargo:<email>' | 'avia:<phone>')`
+вызывается в момент входа и стирает весь пользовательский localStorage, если
+устройство было закреплено за другим аккаунтом.
+
+Так закрыт баг «в одном приложении зашли в два аккаунта — второй видел переписку
+первого»: чаты, сообщения и поездки лежат под общими ключами, а старая очистка
+сверялась с `sessionStorage`, который умирает вместе с вкладкой.
+
+Добавляя новый ключ в localStorage: всё, что начинается на `ovora`, считается
+пользовательским и стирается при смене аккаунта. Настройки устройства (язык,
+звук, вибрация) перечислены в `DEVICE_KEYS` — их дополняй явно.
+
 ## Команды
 
 ```bash
@@ -241,4 +288,5 @@ vercel --prod        # задеплоить на https://dly-a-prid.vercel.app
 2. **`callerEmail` обязателен** во всех write-операциях (cargos, offers, reviews, chats)
 3. **Переводы**: добавляй ключи сразу в `ru` + `tj` + `en`
 4. **Inline скрипты в `index.html` запрещены** — CSP без `unsafe-inline` для скриптов
-5. **GitHub не используется** — работаем локально, деплой только через `vercel --prod`
+5. **Деплой — только через GitHub Pages** (`git push origin HEAD:main`). Пуш делает пользователь: `git push` блокируется классификатором auto-mode
+6. **Секреты пользователь вставляет сам** — не просить прислать токен/пароль в чат и не вводить их за него
