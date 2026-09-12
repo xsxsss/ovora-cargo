@@ -17,6 +17,16 @@ async function fetchAllDocuments() {
   return data.documents || [];
 }
 
+/** Сброс документа: удаляет файл и запись, после чего пользователь загружает заново. */
+async function resetDocument(documentId: string, userEmail: string) {
+  const res = await fetch(`${BASE}/admin/documents/${encodeURIComponent(documentId)}`, {
+    method: 'DELETE', headers: adminHeaders(),
+    body: JSON.stringify({ userEmail }),
+  });
+  if (!res.ok) throw new Error('Не удалось сбросить документ');
+  return res.json();
+}
+
 async function updateDocStatus(documentId: string, userEmail: string, status: string, notes?: string) {
   const res = await fetch(`${BASE}/admin/documents/${encodeURIComponent(documentId)}/status`, {
     method: 'PUT', headers: adminHeaders(),
@@ -78,6 +88,20 @@ export function DocumentVerification() {
   }, []);
 
   useEffect(() => { load(); }, [load]);
+
+  const handleReset = async (doc: any) => {
+    if (!confirm(`Сбросить документ «${doc.title || doc.type}»?\nФайл будет удалён, пользователь сможет загрузить его заново.`)) return;
+    setActionLoading(doc.id);
+    try {
+      await resetDocument(doc.id, doc.driverEmail || doc.userEmail);
+      setDocs(prev => prev.filter(d => d.id !== doc.id));
+      toast.success('Документ сброшен — пользователь может загрузить заново');
+    } catch {
+      toast.error('Ошибка сброса документа');
+    } finally {
+      setActionLoading(null);
+    }
+  };
 
   const handleAction = async (doc: any, status: string) => {
     setActionLoading(doc.id);
@@ -384,6 +408,14 @@ export function DocumentVerification() {
                         Отозвать одобрение
                       </button>
                     )}
+
+                    {/* Доступно в любом статусе: документ удаляется вместе с файлом,
+                        и человек может загрузить его заново. */}
+                    <button onClick={() => handleReset(doc)} disabled={isLoading}
+                      className="w-full mt-3 py-2.5 border border-gray-300 text-gray-600 rounded-xl hover:bg-gray-50 transition-colors flex items-center justify-center gap-2 text-sm font-medium disabled:opacity-50">
+                      {isLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+                      Сбросить — разрешить повторную загрузку
+                    </button>
                   </div>
                 )}
               </CardContent>

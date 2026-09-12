@@ -5212,6 +5212,39 @@ app.put("/make-server-4e36197a/admin/documents/:documentId/status", async (c) =>
   }
 });
 
+// Сброс документа админом: удаляем файл и запись, после чего пользователь может
+// загрузить документ заново. Обычный DELETE /documents/:id требует, чтобы
+// callerEmail совпадал с владельцем, поэтому админу он не подходит.
+app.delete("/make-server-4e36197a/admin/documents/:documentId", async (c) => {
+  try {
+    const documentId = c.req.param("documentId");
+    const { userEmail } = await c.req.json();
+    if (!userEmail) return c.json({ error: "userEmail required" }, 400);
+
+    const docKey = `ovora:document:${userEmail}:${documentId}`;
+    const existing: any = await kv.get(docKey);
+    if (!existing) return c.json({ error: "Document not found" }, 404);
+
+    // Скан содержит персональные данные — удаляем вместе с записью.
+    if (existing.photoPath) {
+      try {
+        await supabase.storage.from(BUCKET).remove([existing.photoPath]);
+      } catch (rmErr) {
+        console.warn('[admin/documents] Не удалось удалить файл скана:', rmErr);
+      }
+    }
+    await kv.del(docKey);
+
+    const adminRole = c.get('adminRole') || 'admin';
+    await CargoAuditLog.record({ action: 'document.admin_reset', actorEmail: `admin:${adminRole}`, targetId: documentId, targetType: 'document', details: { userEmail } });
+    console.log(`[admin/documents] Сброшен документ ${documentId} у ${userEmail}`);
+    return c.json({ success: true });
+  } catch (err) {
+    console.log("Error DELETE /admin/documents/:id:", err);
+    return c.json({ error: 'Внутренняя ошибка сервера' }, 500);
+  }
+});
+
 // ✅ Admin: load settings from KV
 app.get("/make-server-4e36197a/admin/settings", async (c) => {
   try {
