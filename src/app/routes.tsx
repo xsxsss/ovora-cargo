@@ -49,28 +49,6 @@ function requireDriver() {
   return null;
 }
 
-function requireAdmin() {
-  // Вход в CARGO (email + код) и вход в AVIA (телефон + PIN) пишут сессию в
-  // разные хранилища. Учитываем оба: админ может пользоваться только AVIA, и
-  // раньше его молча выбрасывало на главную.
-  // Настоящая проверка прав — код администратора в AdminAuthGate и на сервере;
-  // здесь лишь отсекаем случайный заход без входа в приложение.
-  const hasCargoSession = sessionStorage.getItem('isAuthenticated') === 'true' || (() => {
-    try {
-      const p = JSON.parse(localStorage.getItem('ovora_auth_persistent') || '{}');
-      return !!(p.email && p.role);
-    } catch { return false; }
-  })();
-  const hasAviaSession = (() => {
-    try {
-      const s = JSON.parse(localStorage.getItem('ovora_avia_session') || '{}');
-      return !!s.phone;
-    } catch { return false; }
-  })();
-  if (!hasCargoSession && !hasAviaSession) return redirect('/');
-  return null;
-}
-
 function requireAviaAuth() {
   const session = getAviaSession();
   if (!session?.user?.phone) return redirect('/avia');
@@ -341,11 +319,14 @@ export const router = createBrowserRouter([
       },
 
       // ── Admin Panel ─────────────────────────────────────────────────────────────
+      // Без loader-редиректа: доступ к админке защищает код администратора
+      // (AdminAuthGate внутри AdminLayout + проверка ADMIN_ACCESS_CODE на сервере).
+      // Прежний loader требовал сначала войти в приложение обычным юзером и молча
+      // выкидывал на главную — админу без пользовательского аккаунта было не зайти.
       {
         path: "/admin",
         lazy: () => import("./components/admin/AdminLayout")
           .then(m => ({ Component: m.AdminLayout })),
-        loader: requireAdmin,
         HydrateFallback,
         children: [
           {
