@@ -508,6 +508,38 @@ app.get("/make-server-4e36197a/config/ocr-status", (c) => {
   }
 });
 
+// ── Статус почты (Resend) ────────────────────────────────────────────────────
+// Без RESEND_API_KEY sendEmail молча пропускает отправку, и письмо с кодом входа
+// просто не уйдёт. Эндпоинт показывает только факт наличия ключа и его длину —
+// сам ключ не раскрывается.
+app.get("/make-server-4e36197a/config/email-status", (c) => {
+  try {
+    const apiKey = (Deno.env.get('RESEND_API_KEY') || '').trim();
+    const from = Deno.env.get('EMAIL_FROM') || 'Ovora Cargo <onboarding@resend.dev>';
+
+    if (!apiKey) {
+      return c.json({
+        status: 'missing',
+        message: 'RESEND_API_KEY не настроен — письма не отправляются',
+        configured: false,
+        from,
+      });
+    }
+
+    return c.json({
+      status: 'configured',
+      message: 'Ключ Resend настроен',
+      configured: true,
+      keyPreview: apiKey.substring(0, 4) + '...' + apiKey.substring(apiKey.length - 4),
+      keyLength: apiKey.length,
+      from,
+    });
+  } catch (err) {
+    console.log("Error /config/email-status:", err);
+    return c.json({ error: 'Внутренняя ошибка сервера', configured: false }, 500);
+  }
+});
+
 // ── Direct OCR API Test (admin only) ─────────────────────────────────────────
 app.get("/make-server-4e36197a/config/test-ocr-direct", requireAdminChecked, async (c) => {
   const apiKey = Deno.env.get('OCR_SPACE_API_KEY');
