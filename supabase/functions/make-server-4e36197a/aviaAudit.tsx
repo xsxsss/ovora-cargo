@@ -41,6 +41,40 @@ export interface AviaAuditEntry {
 
 const PREFIX = 'ovora:avia-audit:';
 
+// ── Ретенция ────────────────────────────────────────────────────────────────
+// Журнал лежит в KV, а list() читает его целиком. Со сквозным журналом админки
+// записей стало заметно больше, поэтому без чистки он однажды упрётся в память.
+// Держим полгода и не больше MAX_ENTRIES записей; чистим не чаще раза в
+// час, чтобы не дёргать БД на каждом открытии страницы аудита.
+const RETENTION_MS   = 180 * 24 * 60 * 60 * 1000;
+const MAX_ENTRIES    = 5000;
+const PRUNE_EVERY_MS = 60 * 60 * 1000;
+const PRUNE_MARK     = 'ovora:avia-audit-pruned-at';
+
+// getByPrefix отдаёт только значения, без ключей — поэтому ключ собираем
+// обратно из самой записи, ровно так же, как его составлял record().
+function entryKey(e: AviaAuditEntry): string {
+  return `${PREFIX}${new Date(e.timestamp).getTime()}:${e.id}`;
+}
+
+async function pruneIfDue(all: AviaAuditEntry[]): Promise<void> {
+  try {
+    const mark: any = await kv.get(PRUNE_MARK);
+    if (mark?.at && Date.now() - mark.at < PRUNE_EVERY_MS) return;
+    await kv.set(PRUNE_MARK, { at: Date.now() });
+
+    const cutoff = Date.now() - RETENTION_MS;
+    const sorted = [...all].sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+    const doomed = sorted.filter((e, i) => i >= MAX_ENTRIES || new Date(e.timestamp).getTime() < cutoff);
+    if (doomed.length === 0) return;
+
+    await kv.mdel(doomed.map(entryKey));
+    console.log(`[AviaAudit] удалено старых записей журнала: ${doomed.length}`);
+  } catch (e) {
+    console.warn('[AviaAudit] чистка журнала не удалась (не критично):', e);
+  }
+}
+
 export const AuditLog = {
   /** MIGRATION → INSERT INTO avia_audit_log (...) VALUES (...) */
   async record(entry: Omit<AviaAuditEntry, 'id' | 'timestamp'>): Promise<void> {
@@ -67,7 +101,11 @@ export const AuditLog = {
     offset?: number;
   }): Promise<{ entries: AviaAuditEntry[]; total: number }> {
     const all = (await kv.getByPrefix(PREFIX)) as AviaAuditEntry[];
-    let filtered = all.filter(e => e && typeof e === 'object' && e.id);
+    const valid = all.filter(e => e && typeof e === 'object' && e.id);
+    // Чистку запускаем отсюда: страницу аудита открывают регулярно, а отдельного
+    // планировщика у edge-функции нет. Ответ админу не ждёт — fire-and-forget.
+    pruneIfDue(valid).catch(() => {});
+    let filtered = valid;
 
     if (filter?.actorPhone) filtered = filtered.filter(e => e.actorPhone === filter.actorPhone);
     if (filter?.targetId)   filtered = filtered.filter(e => e.targetId === filter.targetId);
