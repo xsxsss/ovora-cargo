@@ -1,6 +1,7 @@
 import { Hono } from "npm:hono";
 import { setupAviaRoutes } from "./aviaRoutes.tsx";
-import { signUserToken, verifiedEmailFromToken, userAuthEnabled } from "./userAuth.tsx";
+import { aviaAuthEnabled, aviaLegacyOpen } from "./aviaAuth.tsx";
+import { signUserToken, verifiedEmailFromToken, userAuthEnabled, userAuthEnforced, userLegacyOpen } from "./userAuth.tsx";
 import * as bcryptAvia from "npm:bcryptjs"; // used by legacy dead-code block below
 import { cors } from "npm:hono/cors";
 import { logger } from "npm:hono/logger";
@@ -139,16 +140,16 @@ async function requireAdminChecked(c: any, next: any) {
   return await requireAdmin(c, next, isAdminJwtRevoked);
 }
 
-// ── callerEmail: prefer JWT, fallback to body (legacy) ─────────────────────
-// Когда USER_JWT_SECRET настроен, доверяем ТОЛЬКО email из проверенного токена
-// (его ставит user-auth middleware ниже). Значение callerEmail из тела запроса
-// в этом режиме игнорируется — иначе IDOR-проверки можно обойти подстановкой
-// чужого email. Пока секрет не задан — legacy-режим (тело), чтобы не сломать
-// прод до активации токенов на фронте.
+// ── callerEmail: только из проверенного токена ─────────────────────────────
+// Доверяем ТОЛЬКО email из проверенного токена (его ставит user-auth middleware
+// ниже). Значение callerEmail из тела запроса игнорируется — иначе IDOR-проверки
+// обходятся подстановкой чужого email. Если USER_JWT_SECRET не настроен, токена
+// нет ни у кого и функция возвращает null для всех (fail-closed); прежнее
+// доверие к телу запроса включается только явным USER_AUTH_LEGACY_OPEN=1.
 function getCallerEmail(c: any, body?: any): string | null {
   const jwtEmail = c.get("verifiedEmail");
   if (jwtEmail) return jwtEmail;
-  if (userAuthEnabled()) return null;
+  if (userAuthEnforced()) return null;
   return body?.callerEmail || null;
 }
 
@@ -387,6 +388,25 @@ app.get("/make-server-4e36197a/email/unsubscribe", async (c) => {
 </body></html>`);
 });
 
+
+// ── Стартовая проверка секретов ──────────────────────────────────────────────
+// Печатается один раз при холодном старте изолята: если какая-то из проверок
+// владельца отключена, это видно в логах сразу, а не после инцидента.
+(() => {
+  const report = [
+    ['AVIA_JWT_SECRET', aviaAuthEnabled(), aviaLegacyOpen()],
+    ['USER_JWT_SECRET', userAuthEnabled(), userLegacyOpen()],
+  ] as const;
+  for (const [name, set, legacy] of report) {
+    if (set) continue;
+    if (legacy) console.error(`[SECURITY] ${name} не задан, но включён ${name.split('_')[0]}_AUTH_LEGACY_OPEN=1 — проверки владельца ОТКЛЮЧЕНЫ`);
+    else console.warn(`[SECURITY] ${name} не задан — запросы с проверкой владельца отклоняются (fail-closed)`);
+  }
+  if (!(Deno.env.get('ADMIN_JWT_SECRET') || '').trim()) {
+    console.warn('[SECURITY] ADMIN_JWT_SECRET не задан — админка работает только через legacy X-Admin-Code (super-admin, без TTL и отзыва)');
+  }
+})();
+
 // ── Health ────────────────────────────────────────────────────────────────────
 app.get("/make-server-4e36197a/health", (c) => c.json({ status: "ok" }));
 
@@ -463,6 +483,49 @@ app.post("/make-server-4e36197a/admin/auth/revoke-all", requireRole(['super-admi
     console.log('Error POST /admin/auth/revoke-all:', err);
     return c.json({ success: false, error: 'Внутренняя ошибка сервера' }, 500);
   }
+});
+
+// ── Admin: статус секретов авторизации ───────────────────────────────────────
+// Оператор не может посмотреть Supabase Secrets из приложения, а от того, заданы
+// они или нет, напрямую зависит, действуют ли проверки владельца сессии. Раньше
+// единственным следом были строки в логах edge function — их никто не читает.
+// Значения секретов не возвращаются, только факт их наличия.
+app.get("/make-server-4e36197a/admin/security-status", requireRole(['super-admin']), (c) => {
+  const adminJwt = (Deno.env.get('ADMIN_JWT_SECRET') || '').trim().length > 0;
+  const modes = [
+    {
+      name    : 'AVIA_JWT_SECRET',
+      scope   : 'AVIA — проверка владельца сессии (X-Avia-Token)',
+      secretSet: aviaAuthEnabled(),
+      legacyOpen: aviaLegacyOpen(),
+    },
+    {
+      name    : 'USER_JWT_SECRET',
+      scope   : 'CARGO — проверка владельца сессии (X-User-Token)',
+      secretSet: userAuthEnabled(),
+      legacyOpen: userLegacyOpen(),
+    },
+  ].map(m => ({
+    ...m,
+    // enforced=false означает, что проверки владельца отключены и любой клиент
+    // может выдать себя за другого пользователя.
+    enforced: m.secretSet || !m.legacyOpen,
+    ok      : m.secretSet && !m.legacyOpen,
+  }));
+
+  return c.json({
+    adminJwt: {
+      name     : 'ADMIN_JWT_SECRET',
+      scope    : 'Админка — роль в подписанном токене (X-Admin-Token)',
+      secretSet: adminJwt,
+      // Без него /admin/auth не выдаёт токен: работает только legacy X-Admin-Code
+      // (всегда super-admin, без срока жизни и без возможности отзыва), а роли
+      // cargo-admin / avia-admin недоступны вовсе.
+      ok       : adminJwt,
+    },
+    session: modes,
+    allOk  : adminJwt && modes.every(m => m.ok),
+  });
 });
 
 // ── Config: Yandex API Key ────────────────────────────────────────────────────
@@ -1463,7 +1526,7 @@ app.post("/make-server-4e36197a/offers",
 
     // 🔒 Нельзя создать оферту от чужого имени: при активной токен-авторизации
     // senderEmail должен совпадать с владельцем токена. В legacy-режиме — no-op.
-    if (userAuthEnabled()) {
+    if (userAuthEnforced()) {
       const caller = getCallerEmail(c, body);
       if (!caller || caller.toLowerCase().trim() !== senderEmail.toLowerCase().trim()) {
         return c.json({ error: "Forbidden: senderEmail must match authenticated user" }, 403);
@@ -2424,7 +2487,7 @@ app.post("/make-server-4e36197a/chat/message", async (c) => {
 
     // 🔒 Нельзя писать от чужого имени: при активной токен-авторизации senderId
     // должен совпадать с владельцем токена. В legacy-режиме — no-op.
-    if (userAuthEnabled()) {
+    if (userAuthEnforced()) {
       const caller = getCallerEmail(c, body);
       if (!caller || caller.toLowerCase().trim() !== String(senderId).toLowerCase().trim()) {
         return c.json({ error: "Forbidden: senderId must match authenticated user" }, 403);

@@ -1,6 +1,7 @@
 import { projectId, publicAnonKey } from '../../../utils/supabase/info';
 import { CSRF_HEADER, CSRF_TOKEN } from './csrfToken';
 import { getAviaSession } from './aviaApi';
+import { aviaFetch } from './sessionGuard';
 
 const BASE    = `https://${projectId}.supabase.co/functions/v1/make-server-4e36197a`;
 const BASE_HEADERS = {
@@ -102,7 +103,7 @@ export async function initAviaChat(
   recipientPhone: string,
   adRef?:         AviaChatAdRef | null,
 ): Promise<{ chatId: string; meta: AviaChatMeta; isNew: boolean }> {
-  const res  = await fetch(`${BASE}/avia/chat/init`, {
+  const res  = await aviaFetch(`${BASE}/avia/chat/init`, {
     method:  'POST',
     headers: getHeaders(),
     body:    JSON.stringify({ senderPhone, recipientPhone, adRef }),
@@ -120,7 +121,7 @@ export async function getAviaChatMessages(
 ): Promise<{ messages: AviaChatMessage[]; meta: AviaChatMeta }> {
   try {
     const url = `${BASE}/avia/chat/${encodeURIComponent(chatId)}/messages?callerPhone=${encodeURIComponent(callerPhone)}`;
-    const res  = await fetch(url, {
+    const res  = await aviaFetch(url, {
       headers: getHeaders(),
       signal:  withTimeout(),
     });
@@ -137,7 +138,7 @@ export async function sendAviaChatMessage(
   senderPhone: string,
   text:        string,
 ): Promise<AviaChatMessage> {
-  const res  = await fetch(`${BASE}/avia/chat/${encodeURIComponent(chatId)}/messages`, {
+  const res  = await aviaFetch(`${BASE}/avia/chat/${encodeURIComponent(chatId)}/messages`, {
     method:  'POST',
     headers: getHeaders(),
     body:    JSON.stringify({ senderPhone, text, type: 'text' }),
@@ -156,7 +157,7 @@ export async function sendTypedChatMessage(
   type:        AviaChatMessageType,
   meta?:       DealMessageMeta,
 ): Promise<AviaChatMessage> {
-  const res  = await fetch(`${BASE}/avia/chat/${encodeURIComponent(chatId)}/messages`, {
+  const res  = await aviaFetch(`${BASE}/avia/chat/${encodeURIComponent(chatId)}/messages`, {
     method:  'POST',
     headers: getHeaders(),
     body:    JSON.stringify({ senderPhone, text, type, meta }),
@@ -176,7 +177,7 @@ export async function markAviaChatSeen(
   // Guard: пустой chatId даёт URL с "//seen" → браузер бросает Failed to fetch
   if (!chatId || !chatId.trim() || !phone || !phone.trim()) return;
   try {
-    await fetch(`${BASE}/avia/chat/${encodeURIComponent(chatId.trim())}/seen`, {
+    await aviaFetch(`${BASE}/avia/chat/${encodeURIComponent(chatId.trim())}/seen`, {
       method:  'POST',
       headers: getHeaders(),
       body:    JSON.stringify({ phone: phone.trim() }),
@@ -194,7 +195,7 @@ export async function deleteAviaChat(
   phone: string,
 ): Promise<{ success: boolean; cancelledDealIds: string[]; error?: string }> {
   try {
-    const res = await fetch(`${BASE}/avia/chat/${encodeURIComponent(chatId)}`, {
+    const res = await aviaFetch(`${BASE}/avia/chat/${encodeURIComponent(chatId)}`, {
       method:  'DELETE',
       headers: getHeaders(),
       body:    JSON.stringify({ phone }),
@@ -214,7 +215,7 @@ export async function deleteAviaChat(
 export async function getAviaUserChats(phone: string): Promise<AviaChat[]> {
   try {
     const clean = phone.replace(/\D/g, '');
-    const res   = await fetch(`${BASE}/avia/chats/user/${encodeURIComponent(clean)}?callerPhone=${encodeURIComponent(clean)}`, {
+    const res   = await aviaFetch(`${BASE}/avia/chats/user/${encodeURIComponent(clean)}?callerPhone=${encodeURIComponent(clean)}`, {
       headers: getHeaders(),
       signal:  withTimeout(),
     });

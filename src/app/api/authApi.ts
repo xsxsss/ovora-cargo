@@ -1,6 +1,7 @@
 import { projectId, publicAnonKey } from '../../../utils/supabase/info';
 import { cacheClear as clearApiCache, adminHeaders } from './dataApi';
 import { CSRF_HEADER, CSRF_TOKEN } from './csrfToken';
+import { cargoFetch } from './sessionGuard';
 
 // authApi v2 - with getCachedUser export
 const BASE = `https://${projectId}.supabase.co/functions/v1/make-server-4e36197a`;
@@ -152,7 +153,7 @@ export function getCachedUser(): Partial<OvoraUser> | null {
 }
 
 export async function registerUser(user: Partial<OvoraUser>): Promise<OvoraUser> {
-  const res = await fetch(`${BASE}/auth/register`, {
+  const res = await cargoFetch(`${BASE}/auth/register`, {
     method: 'POST',
     headers: HEADERS,
     body: JSON.stringify(user),
@@ -173,7 +174,7 @@ export async function registerUser(user: Partial<OvoraUser>): Promise<OvoraUser>
 }
 
 export async function findUserByEmail(email: string): Promise<OvoraUser | null> {
-  const res = await fetch(`${BASE}/auth/login-email`, {
+  const res = await cargoFetch(`${BASE}/auth/login-email`, {
     method: 'POST',
     headers: HEADERS,
     body: JSON.stringify({ email }),
@@ -185,7 +186,7 @@ export async function findUserByEmail(email: string): Promise<OvoraUser | null> 
 }
 
 export async function findUserByPhone(phone: string): Promise<OvoraUser | null> {
-  const res = await fetch(`${BASE}/auth/login-phone`, {
+  const res = await cargoFetch(`${BASE}/auth/login-phone`, {
     method: 'POST',
     headers: HEADERS,
     body: JSON.stringify({ phone }),
@@ -208,7 +209,7 @@ export function loginUser(user: OvoraUser) {
 }
 
 export async function updateUser(updates: Partial<OvoraUser> & { email: string }): Promise<OvoraUser> {
-  const res = await fetch(`${BASE}/auth/user`, {
+  const res = await cargoFetch(`${BASE}/auth/user`, {
     method: 'PUT',
     headers: HEADERS,
     body: JSON.stringify(updates),
@@ -250,7 +251,7 @@ export interface EmailCheckResult {
  * Существующий → возвращает hasCode:true, код не возвращается
  */
 export async function checkEmailForCode(email: string): Promise<EmailCheckResult> {
-  const res = await fetch(`${BASE}/auth/email-check`, {
+  const res = await cargoFetch(`${BASE}/auth/email-check`, {
     method: 'POST',
     headers: HEADERS,
     body: JSON.stringify({ email: email.trim().toLowerCase() }),
@@ -269,7 +270,7 @@ export async function checkEmailForCode(email: string): Promise<EmailCheckResult
  * Верифицировать постоянный код доступа (SHA-256 на сервере)
  */
 export async function verifyPermCode(email: string, code: string): Promise<void> {
-  const res = await fetch(`${BASE}/auth/verify-perm-code`, {
+  const res = await cargoFetch(`${BASE}/auth/verify-perm-code`, {
     method: 'POST',
     headers: HEADERS,
     body: JSON.stringify({ email: email.trim().toLowerCase(), code }),
@@ -287,7 +288,7 @@ export async function verifyPermCode(email: string, code: string): Promise<void>
  * Шаг для нового пользователя: без него сервер не даст установить PIN.
  */
 export async function sendEmailCode(email: string): Promise<void> {
-  const res = await fetch(`${BASE}/auth/send-email-code`, {
+  const res = await cargoFetch(`${BASE}/auth/send-email-code`, {
     method: 'POST',
     headers: HEADERS,
     body: JSON.stringify({ email: email.trim().toLowerCase() }),
@@ -298,7 +299,7 @@ export async function sendEmailCode(email: string): Promise<void> {
 
 /** Проверить код из письма. После успеха открывается установка PIN. */
 export async function verifyEmailCode(email: string, code: string): Promise<void> {
-  const res = await fetch(`${BASE}/auth/verify-email-code`, {
+  const res = await cargoFetch(`${BASE}/auth/verify-email-code`, {
     method: 'POST',
     headers: HEADERS,
     body: JSON.stringify({ email: email.trim().toLowerCase(), code }),
@@ -311,7 +312,7 @@ export async function verifyEmailCode(email: string, code: string): Promise<void
  * Установить 6-значный код (только для нового пользователя, хранится SHA-256 хеш)
  */
 export async function setUserCode(email: string, code: string): Promise<void> {
-  const res = await fetch(`${BASE}/auth/set-code`, {
+  const res = await cargoFetch(`${BASE}/auth/set-code`, {
     method: 'POST',
     headers: HEADERS,
     body: JSON.stringify({ email: email.trim().toLowerCase(), code }),
@@ -326,7 +327,7 @@ export async function setUserCode(email: string, code: string): Promise<void> {
 export async function resetUserCode(email: string): Promise<void> {
   // 🔒 reset-code теперь требует прав админа на сервере (requireAdminChecked).
   // adminHeaders() добавляет X-Admin-Token/X-Admin-Code из sessionStorage.
-  const res = await fetch(`${BASE}/auth/reset-code`, {
+  const res = await cargoFetch(`${BASE}/auth/reset-code`, {
     method: 'POST',
     headers: adminHeaders(),
     body: JSON.stringify({ email: email.trim().toLowerCase() }),
@@ -347,7 +348,7 @@ export async function sendOtp(
   type: 'email' | 'phone',
   _digits?: number,
 ): Promise<{ code: string | null; expiresIn: number; emailSent: boolean | null; debug: string | null; rateLimited?: boolean; cooldownRemaining?: number }> {
-  const res = await fetch(`${BASE}/auth/send-otp`, {
+  const res = await cargoFetch(`${BASE}/auth/send-otp`, {
     method: 'POST',
     headers: HEADERS,
     body: JSON.stringify({ identifier, type }),
@@ -377,7 +378,7 @@ export async function verifyOtp(
   type: 'email' | 'phone',
   code: string,
 ): Promise<true> {
-  const res = await fetch(`${BASE}/auth/verify-otp`, {
+  const res = await cargoFetch(`${BASE}/auth/verify-otp`, {
     method: 'POST',
     headers: HEADERS,
     body: JSON.stringify({ identifier, type, code }),

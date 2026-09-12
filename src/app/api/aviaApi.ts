@@ -1,5 +1,6 @@
 import { projectId, publicAnonKey } from '../../../utils/supabase/info';
 import { CSRF_HEADER, CSRF_TOKEN } from './csrfToken';
+import { aviaFetch } from './sessionGuard';
 
 const BASE = `https://${projectId}.supabase.co/functions/v1/make-server-4e36197a`;
 const BASE_HEADERS = {
@@ -152,7 +153,7 @@ async function fetchWithRetry(
   let lastError: Error | null = null;
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
-      const res = await fetch(input, init);
+      const res = await aviaFetch(input, init);
       // Don't retry on client errors (4xx), only on server/network errors
       if (res.ok || (res.status >= 400 && res.status < 500)) return res;
       lastError = new Error(`HTTP ${res.status}`);
@@ -170,7 +171,7 @@ async function fetchWithRetry(
 
 /** Проверить телефон: новый или существующий? */
 export async function checkPhone(phone: string): Promise<AviaCheckResult> {
-  const res = await fetch(`${BASE}/avia/check-phone`, {
+  const res = await aviaFetch(`${BASE}/avia/check-phone`, {
     method: 'POST',
     headers: getHeaders(),
     body: JSON.stringify({ phone }),
@@ -182,7 +183,7 @@ export async function checkPhone(phone: string): Promise<AviaCheckResult> {
 
 /** Регистрация: phone + pin + role */
 export async function registerAvia(phone: string, pin: string, role: string): Promise<AviaUser> {
-  const res = await fetch(`${BASE}/avia/register`, {
+  const res = await aviaFetch(`${BASE}/avia/register`, {
     method: 'POST',
     headers: getHeaders(),
     body: JSON.stringify({ phone, pin, role }),
@@ -195,7 +196,7 @@ export async function registerAvia(phone: string, pin: string, role: string): Pr
 
 /** Вход: phone + pin */
 export async function loginAvia(phone: string, pin: string): Promise<AviaUser> {
-  const res = await fetch(`${BASE}/avia/login`, {
+  const res = await aviaFetch(`${BASE}/avia/login`, {
     method: 'POST',
     headers: getHeaders(),
     body: JSON.stringify({ phone, pin }),
@@ -212,7 +213,7 @@ export interface AviaSupportContacts { telegram: string; whatsapp: string; email
 export async function getAviaSupportContacts(): Promise<AviaSupportContacts> {
   const empty = { telegram: '', whatsapp: '', email: '' };
   try {
-    const res = await fetch(`${BASE}/avia/support-contacts`, { headers: getHeaders() });
+    const res = await aviaFetch(`${BASE}/avia/support-contacts`, { headers: getHeaders() });
     if (!res.ok) return empty;
     return await res.json();
   } catch {
@@ -259,7 +260,7 @@ export async function uploadAviaAvatar(
   const formData = new FormData();
   formData.append('avatar', file);
 
-  const res = await fetch(`${BASE}/avia/users/${encodeURIComponent(clean)}/avatar`, {
+  const res = await aviaFetch(`${BASE}/avia/users/${encodeURIComponent(clean)}/avatar`, {
     method: 'POST',
     headers: getFormHeaders(),
     body: formData,
@@ -278,7 +279,7 @@ export async function uploadAviaAvatar(
 
 /** OCR сканирование паспорта */
 export async function scanPassport(imageBase64: string): Promise<AviaOcrResult> {
-  const res = await fetch(`${BASE}/avia/scan-passport`, {
+  const res = await aviaFetch(`${BASE}/avia/scan-passport`, {
     method: 'POST',
     headers: getHeaders(),
     body: JSON.stringify({ imageBase64 }),
@@ -301,7 +302,7 @@ export async function uploadPassport(
   if (expiryDate) formData.append('expiryDate', expiryDate);
   if (skipOcr) formData.append('skipOcr', 'true');
 
-  const res = await fetch(`${BASE}/avia/upload-passport`, {
+  const res = await aviaFetch(`${BASE}/avia/upload-passport`, {
     method: 'POST',
     headers: getFormHeaders(),
     body: formData,
@@ -323,7 +324,7 @@ export async function getPassportPhoto(phone: string): Promise<string | null> {
   const clean = phone.replace(/\D/g, '');
   const callerPhone = getAviaSession()?.phone || '';
   const qs = callerPhone ? `?callerPhone=${encodeURIComponent(callerPhone)}` : '';
-  const res = await fetch(`${BASE}/avia/passport-photo/${encodeURIComponent(clean)}${qs}`, {
+  const res = await aviaFetch(`${BASE}/avia/passport-photo/${encodeURIComponent(clean)}${qs}`, {
     headers: getHeaders(),
   });
   const data = await res.json();
@@ -396,7 +397,7 @@ export async function getAviaFlight(id: string, callerPhone?: string): Promise<A
 }
 
 export async function createAviaFlight(flightData: Partial<AviaFlight>): Promise<{ success: boolean; flight?: AviaFlight; error?: string }> {
-  const res = await fetch(`${BASE}/avia/flights`, {
+  const res = await aviaFetch(`${BASE}/avia/flights`, {
     method: 'POST',
     headers: getHeaders(),
     body: JSON.stringify(flightData),
@@ -410,7 +411,7 @@ export async function updateAviaFlight(
   callerPhone: string,
   updates: { pricePerKg?: number; docsPrice?: number; currency?: string; flightNo?: string; date?: string },
 ): Promise<{ success: boolean; flight?: AviaFlight; error?: string }> {
-  const res = await fetch(`${BASE}/avia/flights/${encodeURIComponent(id)}`, {
+  const res = await aviaFetch(`${BASE}/avia/flights/${encodeURIComponent(id)}`, {
     method: 'PATCH',
     headers: getHeaders(),
     body: JSON.stringify({ callerPhone, ...updates }),
@@ -420,7 +421,7 @@ export async function updateAviaFlight(
 
 /** Удалить рейс (мягкое удаление) */
 export async function deleteAviaFlight(id: string, callerPhone: string): Promise<{ success: boolean; error?: string }> {
-  const res = await fetch(`${BASE}/avia/flights/${encodeURIComponent(id)}?callerPhone=${encodeURIComponent(callerPhone)}`, {
+  const res = await aviaFetch(`${BASE}/avia/flights/${encodeURIComponent(id)}?callerPhone=${encodeURIComponent(callerPhone)}`, {
     method: 'DELETE',
     headers: getHeaders(),
   });
@@ -429,7 +430,7 @@ export async function deleteAviaFlight(id: string, callerPhone: string): Promise
 
 /** Начать поездку (status → in_progress, рейс скрывается из публичного поиска) */
 export async function startAviaFlight(id: string, callerPhone: string): Promise<{ success: boolean; flight?: AviaFlight; error?: string }> {
-  const res = await fetch(`${BASE}/avia/flights/${encodeURIComponent(id)}/start`, {
+  const res = await aviaFetch(`${BASE}/avia/flights/${encodeURIComponent(id)}/start`, {
     method: 'PATCH',
     headers: getHeaders(),
     body: JSON.stringify({ callerPhone }),
@@ -439,7 +440,7 @@ export async function startAviaFlight(id: string, callerPhone: string): Promise<
 
 /** Закрыть рейс (status → closed) */
 export async function closeAviaFlight(id: string, callerPhone: string): Promise<{ success: boolean; flight?: AviaFlight; error?: string }> {
-  const res = await fetch(`${BASE}/avia/flights/${encodeURIComponent(id)}/close`, {
+  const res = await aviaFetch(`${BASE}/avia/flights/${encodeURIComponent(id)}/close`, {
     method: 'PATCH',
     headers: getHeaders(),
     body: JSON.stringify({ callerPhone }),
@@ -449,7 +450,7 @@ export async function closeAviaFlight(id: string, callerPhone: string): Promise<
 
 /** Завершить поездку (status → completed, все принятые сделки → completed) */
 export async function completeAviaFlight(id: string, callerPhone: string): Promise<{ success: boolean; flight?: AviaFlight; completedDeals?: number; error?: string }> {
-  const res = await fetch(`${BASE}/avia/flights/${encodeURIComponent(id)}/complete`, {
+  const res = await aviaFetch(`${BASE}/avia/flights/${encodeURIComponent(id)}/complete`, {
     method: 'PATCH',
     headers: getHeaders(),
     body: JSON.stringify({ callerPhone }),
@@ -513,7 +514,7 @@ export async function getAviaNotifications(phone: string, signal?: AbortSignal):
   // Если сигнал уже отменён — не делаем запрос
   if (signal?.aborted) return [];
   try {
-    const res = await fetch(`${BASE}/avia/notifications/${encodeURIComponent(clean)}`, {
+    const res = await aviaFetch(`${BASE}/avia/notifications/${encodeURIComponent(clean)}`, {
       headers: getHeaders(),
       signal,
     });
@@ -537,7 +538,7 @@ export async function markAviaNotificationsRead(phone: string, id: string): Prom
   const clean = phone.replace(/\D/g, '');
   if (!clean) return;
   try {
-    await fetch(`${BASE}/avia/notifications/read`, {
+    await aviaFetch(`${BASE}/avia/notifications/read`, {
       method: 'POST',
       headers: getHeaders(),
       body: JSON.stringify({ phone: clean, id }),
@@ -552,7 +553,7 @@ export async function deleteAviaNotification(phone: string, id: string): Promise
   const clean = phone.replace(/\D/g, '');
   if (!clean || !id) return;
   try {
-    await fetch(`${BASE}/avia/notifications/${encodeURIComponent(clean)}/${encodeURIComponent(id)}`, {
+    await aviaFetch(`${BASE}/avia/notifications/${encodeURIComponent(clean)}/${encodeURIComponent(id)}`, {
       method: 'DELETE',
       headers: getHeaders(),
     });
@@ -567,7 +568,7 @@ export async function checkAviaUnread(phone: string, signal?: AbortSignal): Prom
   if (!clean) return 0;
   if (signal?.aborted) return 0;
   try {
-    const res = await fetch(`${BASE}/avia/notifications/check/${encodeURIComponent(clean)}`, {
+    const res = await aviaFetch(`${BASE}/avia/notifications/check/${encodeURIComponent(clean)}`, {
       headers: getHeaders(),
       signal,
     });
@@ -589,7 +590,7 @@ export async function changeAviaPin(
   newPin: string,
 ): Promise<{ success: boolean; error?: string; lockedUntil?: string; lockedSeconds?: number; attemptsLeft?: number }> {
   const clean = phone.replace(/\D/g, '');
-  const res = await fetch(`${BASE}/avia/users/${encodeURIComponent(clean)}/pin`, {
+  const res = await aviaFetch(`${BASE}/avia/users/${encodeURIComponent(clean)}/pin`, {
     method: 'PATCH',
     headers: getHeaders(),
     body: JSON.stringify({ currentPin, newPin }),
