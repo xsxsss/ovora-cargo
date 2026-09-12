@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import {
   ShieldCheck, Search, RefreshCw, Trash2, AlertTriangle,
   CheckCircle2, Clock, XCircle, Mail, Hash, Activity,
-  ChevronDown, ChevronUp, X, RotateCcw, Lock,
+  ChevronDown, ChevronUp, X, RotateCcw, Lock, UserCog, Loader2,
 } from 'lucide-react';
 import { projectId } from '../../../../utils/supabase/info';
 import { adminHeaders } from '../../api/dataApi';
@@ -60,6 +60,32 @@ export function CodeManagement() {
   const [sortAsc, setSortAsc] = useState(false);
   const [resettingEmail, setResettingEmail] = useState<string | null>(null);
   const [confirmEmail, setConfirmEmail] = useState<string | null>(null);
+  const [syncing, setSyncing] = useState(false);
+
+  // Имя и телефон уходят в карточку Supabase Auth при регистрации и правке
+  // профиля. У тех, кто зарегистрировался раньше, эти колонки в дашборде
+  // остались пустыми — эта кнопка догоняет их одним проходом.
+  const syncIdentities = async () => {
+    if (syncing) return;
+    setSyncing(true);
+    try {
+      const res = await fetch(`${BASE}/admin/auth/sync-identities`, {
+        method: 'POST', headers: adminHeaders(),
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        toast.success(`Досланы данные: ${data.synced} из ${data.total} (без имени и телефона: ${data.skipped})`);
+      } else if (res.status === 403) {
+        toast.error('Досылка доступна только главному админу');
+      } else {
+        toast.error('Не удалось дослать: ' + (data.error || res.status));
+      }
+    } catch {
+      toast.error('Сетевая ошибка при досылке данных');
+    } finally {
+      setSyncing(false);
+    }
+  };
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -150,7 +176,16 @@ export function CodeManagement() {
           ...(stats.blocked > 0 ? [{ label: 'Заблокировано', value: stats.blocked }] : []),
         ]}
         actions={
-          <HeaderBtn icon={RefreshCw} onClick={load}>Обновить</HeaderBtn>
+          <>
+            <HeaderBtn
+              icon={syncing ? Loader2 : UserCog}
+              variant="ghost"
+              onClick={syncIdentities}
+            >
+              {syncing ? 'Досылаю…' : 'Досылать в Supabase'}
+            </HeaderBtn>
+            <HeaderBtn icon={RefreshCw} onClick={load}>Обновить</HeaderBtn>
+          </>
         }
       />
 

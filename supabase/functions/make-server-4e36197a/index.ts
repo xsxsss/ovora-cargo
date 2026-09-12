@@ -5371,6 +5371,36 @@ app.put("/make-server-4e36197a/admin/settings", async (c) => {
 });
 
 // ✅ Admin: block/unblock user
+// ── Разовая досылка данных в Supabase Auth ───────────────────────────────────
+// Имя и телефон уходят в Auth при регистрации и правке профиля. У тех, кто
+// зарегистрировался раньше, карточка в дашборде так и осталась пустой —
+// эта кнопка догоняет их одним проходом. Только главный админ.
+app.post("/make-server-4e36197a/admin/auth/sync-identities", requireRole(['super-admin']), async (c) => {
+  try {
+    const users: any[] = await kv.getByPrefix('ovora:user:email:');
+    let synced = 0, skipped = 0;
+
+    for (const u of users) {
+      if (!u?.email) { skipped++; continue; }
+      const displayName = buildDisplayName(u);
+      if (!displayName && !u.phone) { skipped++; continue; }
+      await syncAuthIdentity(u.email, {
+        displayName,
+        phone   : u.phone,
+        role    : u.role,
+        platform: 'cargo',
+      });
+      synced++;
+    }
+
+    console.log(`[AuthIdentity] досылка завершена: ${synced} обновлено, ${skipped} без данных`);
+    return c.json({ success: true, synced, skipped, total: users.length });
+  } catch (err) {
+    console.log("Error POST /admin/auth/sync-identities:", err);
+    return c.json({ error: 'Внутренняя ошибка сервера' }, 500);
+  }
+});
+
 // ── Устройства входа пользователя CARGO ──────────────────────────────────────
 // Показывает, с какого телефона и браузера человек заходит: помогает разбирать
 // жалобы «не открывается сайт» и видно, если в аккаунт заходят с разных мест.
