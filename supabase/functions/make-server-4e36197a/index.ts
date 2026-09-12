@@ -21,7 +21,7 @@ import { Blacklist } from "./blacklist.tsx";
 import { AuditLog as CargoAuditLog } from "./cargoAudit.tsx";
 import { handleSendOtp, handleVerifyOtp } from "./otp.tsx";
 import { handleGenerateBackup, handleVerifyBackup, handleBackupExists } from "./backup.tsx";
-import { handleEmailCheck, handleSetCode, handleVerifyPermCode, handleResetCode, handleAdminListCodes } from "./permCode.tsx";
+import { handleEmailCheck, handleSetCode, handleVerifyPermCode, handleResetCode, handleAdminListCodes, handleSendEmailCode, handleVerifyEmailCode } from "./permCode.tsx";
 import {
   sendEmail, throttleEmail, setUnsubscribed,
   welcomeTemplate, newOfferTemplate,
@@ -6020,6 +6020,10 @@ app.post("/make-server-4e36197a/auth/verify-otp", handleVerifyOtp);
 
 // ── Permanent Crypto Code ──────────────────────────────────────────────────────
 app.post("/make-server-4e36197a/auth/email-check", handleEmailCheck);
+// Подтверждение почты кодом из письма — обязательный шаг перед установкой PIN
+// для нового пользователя (см. permCode.tsx).
+app.post("/make-server-4e36197a/auth/send-email-code", handleSendEmailCode);
+app.post("/make-server-4e36197a/auth/verify-email-code", handleVerifyEmailCode);
 app.post("/make-server-4e36197a/auth/set-code", handleSetCode);
 app.post("/make-server-4e36197a/auth/verify-perm-code", handleVerifyPermCode);
 // 🔒 reset-code удаляет хеш кода пользователя → требует прав админа.

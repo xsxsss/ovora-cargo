@@ -13,6 +13,7 @@ import type { Context } from "npm:hono";
 import * as kv from "./kv_store.tsx";
 import * as bcrypt from "npm:bcryptjs";
 import { signUserToken } from "./userAuth.tsx";
+import { sendEmail, loginCodeTemplate } from "./email.tsx";
 
 const MAX_ATTEMPTS = 10;
 const BCRYPT_ROUNDS = 12; // Высокий cost-фактор = медленный брутфорс
@@ -88,6 +89,114 @@ export async function handleEmailCheck(c: Context) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
+//  ПОДТВЕРЖДЕНИЕ ПОЧТЫ КОДОМ (новый пользователь, до установки PIN)
+//  Почта → 6-значный код письмом → ввод кода → короткоживущий флаг «подтверждена»
+//  → только после него разрешается /auth/set-code.
+//  Без этого шага любой мог занять чужой, ещё не зарегистрированный email.
+// ══════════════════════════════════════════════════════════════════════════════
+
+const CODE_TTL_MS      = 10 * 60 * 1000; // код живёт 10 минут
+const VERIFIED_TTL_MS  = 15 * 60 * 1000; // окно на установку PIN после подтверждения
+const MAX_CODE_ATTEMPTS = 5;
+
+const emailCodeKey     = (email: string) => `ovora:email_login_code:${email}`;
+const emailVerifiedKey = (email: string) => `ovora:email_verified:${email}`;
+
+/** 6 цифр из криптостойкого источника (не Math.random). */
+function generateSixDigits(): string {
+  const n = crypto.getRandomValues(new Uint32Array(1))[0] % 1_000_000;
+  return String(n).padStart(6, "0");
+}
+
+export async function handleSendEmailCode(c: Context) {
+  try {
+    const body = await c.req.json();
+    const email = (body.email || "").toLowerCase().trim();
+
+    const ip = c.req.header('cf-connecting-ip') || c.req.header('x-forwarded-for') || 'unknown';
+    if (!emailCheckRateLimit(ip)) {
+      console.warn(`[PermCode] Rate limit exceeded for IP: ${ip}`);
+      return c.json({ success: false, error: 'Слишком много запросов. Попробуйте через минуту.' }, 429);
+    }
+
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return c.json({ success: false, error: "Некорректный email адрес" }, 400);
+    }
+
+    const userRecord: any = await kv.get(`ovora:user:email:${email}`);
+    if (userRecord?.status === "blocked") {
+      return c.json({ success: false, error: "Ваш аккаунт заблокирован. Обратитесь в поддержку.", blocked: true }, 403);
+    }
+
+    const code = generateSixDigits();
+    await kv.set(emailCodeKey(email), {
+      codeHash : await hashCode(code),
+      email,
+      expiresAt: Date.now() + CODE_TTL_MS,
+      attempts : 0,
+    });
+
+    const tpl = loginCodeTemplate({ code, email, ttlMinutes: CODE_TTL_MS / 60_000 });
+    const sent = await sendEmail({ to: email, subject: tpl.subject, html: tpl.html });
+
+    if (!sent.success) {
+      // Письмо не ушло — честно говорим об этом, иначе пользователь ждёт код впустую.
+      console.error(`[PermCode] Не удалось отправить код на ${email}:`, sent.error);
+      return c.json({ success: false, error: 'Не удалось отправить письмо. Проверьте адрес или попробуйте позже.' }, 502);
+    }
+
+    console.log(`[PermCode] 📧 Код входа отправлен на ${email}`);
+    return c.json({ success: true, expiresIn: CODE_TTL_MS / 1000 });
+
+  } catch (err) {
+    console.log("Error POST /auth/send-email-code:", err);
+    return c.json({ success: false, error: 'Внутренняя ошибка сервера' }, 500);
+  }
+}
+
+export async function handleVerifyEmailCode(c: Context) {
+  try {
+    const body = await c.req.json();
+    const email = (body.email || "").toLowerCase().trim();
+    const code  = (body.code || "").trim();
+
+    if (!email || !code) return c.json({ success: false, error: "Email и код обязательны" }, 400);
+
+    const stored: any = await kv.get(emailCodeKey(email));
+    if (!stored?.codeHash) {
+      return c.json({ success: false, error: "Код не найден. Запросите новый." });
+    }
+    if (Date.now() > stored.expiresAt) {
+      await kv.del(emailCodeKey(email));
+      return c.json({ success: false, error: "Срок действия кода истёк. Запросите новый." });
+    }
+
+    const attempts = (stored.attempts || 0) + 1;
+    if (attempts > MAX_CODE_ATTEMPTS) {
+      await kv.del(emailCodeKey(email));
+      return c.json({ success: false, error: "Превышен лимит попыток. Запросите новый код." });
+    }
+
+    if (!(await verifyCode(code, stored.codeHash))) {
+      await kv.set(emailCodeKey(email), { ...stored, attempts });
+      const left = MAX_CODE_ATTEMPTS - attempts;
+      return c.json({ success: false, error: `Неверный код. Осталось попыток: ${left}`, attemptsLeft: left });
+    }
+
+    // Код одноразовый: удаляем и выдаём короткоживущее подтверждение почты.
+    await kv.del(emailCodeKey(email));
+    await kv.set(emailVerifiedKey(email), { email, until: Date.now() + VERIFIED_TTL_MS });
+
+    console.log(`[PermCode] ✅ Почта подтверждена: ${email}`);
+    return c.json({ success: true });
+
+  } catch (err) {
+    console.log("Error POST /auth/verify-email-code:", err);
+    return c.json({ success: false, error: 'Внутренняя ошибка сервера' }, 500);
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
 //  POST /auth/set-code
 //  Новый пользователь устанавливает свой 6-значный код (сохраняется хеш)
 // ══════════════════════════════════════════════════════════════════════════════
@@ -108,6 +217,14 @@ export async function handleSetCode(c: Context) {
       return c.json({ success: false, error: "Код для этого email уже установлен. Используйте существующий код для входа." }, 409);
     }
 
+    // PIN ставится только после подтверждения почты кодом из письма — иначе
+    // любой мог бы занять чужой, ещё не зарегистрированный email.
+    const verified: any = await kv.get(emailVerifiedKey(email));
+    if (!verified || Date.now() > verified.until) {
+      if (verified) await kv.del(emailVerifiedKey(email));
+      return c.json({ success: false, error: "Сначала подтвердите почту кодом из письма" }, 403);
+    }
+
     const codeHash = await hashCode(code);
 
     await kv.set(permKey(email), {
@@ -117,6 +234,9 @@ export async function handleSetCode(c: Context) {
       attempts: 0,
       lastUsed: null,
     });
+
+    // Подтверждение одноразовое: второй PIN по тому же письму поставить нельзя.
+    await kv.del(emailVerifiedKey(email));
 
     console.log(`[PermCode] ✅ User-defined code set for ${email} | hash: ${codeHash.slice(0, 12)}...`);
     return c.json({ success: true, message: "Код установлен" });

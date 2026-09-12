@@ -283,6 +283,31 @@ export async function verifyPermCode(email: string, code: string): Promise<void>
 }
 
 /**
+ * Отправить 6-значный код подтверждения на почту.
+ * Шаг для нового пользователя: без него сервер не даст установить PIN.
+ */
+export async function sendEmailCode(email: string): Promise<void> {
+  const res = await fetch(`${BASE}/auth/send-email-code`, {
+    method: 'POST',
+    headers: HEADERS,
+    body: JSON.stringify({ email: email.trim().toLowerCase() }),
+  });
+  const data = await res.json();
+  if (!res.ok || !data.success) throw new Error(data.error || 'Не удалось отправить код на почту');
+}
+
+/** Проверить код из письма. После успеха открывается установка PIN. */
+export async function verifyEmailCode(email: string, code: string): Promise<void> {
+  const res = await fetch(`${BASE}/auth/verify-email-code`, {
+    method: 'POST',
+    headers: HEADERS,
+    body: JSON.stringify({ email: email.trim().toLowerCase(), code }),
+  });
+  const data = await res.json();
+  if (!res.ok || !data.success) throw new Error(data.error || 'Неверный код');
+}
+
+/**
  * Установить 6-значный код (только для нового пользователя, хранится SHA-256 хеш)
  */
 export async function setUserCode(email: string, code: string): Promise<void> {

@@ -11,6 +11,7 @@ import * as notificationsApi from '../api/notificationsApi';
 import {
   registerUser, findUserByEmail, loginUser,
   checkEmailForCode, setUserCode, verifyPermCode, resetUserCode,
+  sendEmailCode, verifyEmailCode,
   type OvoraUser,
 } from '../api/authApi';
 import { motion } from 'motion/react';
@@ -18,6 +19,7 @@ import { motion } from 'motion/react';
 // ── Steps ──────────────────────────────────────────────────────────────────────
 type Step =
   | 'email'
+  | 'email_code'   // новый пользователь: подтверждение почты кодом из письма
   | 'create_code'
   | 'enter_code'
   | 'forgot'
@@ -271,6 +273,7 @@ export function EmailAuth() {
   const [codeErr,    setCodeErr]    = useState('');
   const [verifying,  setVerifying]  = useState(false);
   const [resetting,  setResetting]  = useState(false);
+  const [resending,  setResending]  = useState(false);
 
   // confirm
   const [confirm,      setConfirm]      = useState(['', '', '', '', '', '']);
@@ -302,7 +305,7 @@ export function EmailAuth() {
 
   useEffect(() => { if (step === 'email') emailRef.current?.focus(); }, [step]);
   useEffect(() => {
-    if (step === 'create_code' || step === 'enter_code')
+    if (step === 'create_code' || step === 'enter_code' || step === 'email_code')
       setTimeout(() => codeRefs.current[0]?.focus(), 200);
   }, [step]);
   useEffect(() => {
@@ -323,9 +326,43 @@ export function EmailAuth() {
     try {
       const result = await checkEmailForCode(t);
       resetCode(); resetConfirm(); setCodeErr('');
-      setStep(result.isNew ? 'create_code' : 'enter_code');
+      if (result.isNew) {
+        // Новый пользователь: сначала подтверждаем, что почта его — кодом из
+        // письма, и только после этого даём придумать PIN.
+        await sendEmailCode(t);
+        setStep('email_code');
+      } else {
+        // Вернувшийся: PIN уже установлен, письмо не нужно.
+        setStep('enter_code');
+      }
     } catch (err: any) { toast.error(err?.message || 'Ошибка проверки email'); }
     finally { setChecking(false); }
+  };
+
+  // Шаг нового пользователя: подтверждаем почту кодом из письма.
+  // Успех открывает установку PIN — сервер без этого её отклонит.
+  const handleVerifyEmailCode = async () => {
+    if (codeStr.length < 6) { setCodeErr('Введите 6-значный код из письма'); return; }
+    setCodeErr(''); setVerifying(true);
+    const calledFromStep = stepRef.current;
+    try {
+      await verifyEmailCode(email.trim(), codeStr);
+      if (stepRef.current !== calledFromStep) return;
+      resetCode(); resetConfirm(); setCodeErr('');
+      setStep('create_code');
+    } catch (err: any) {
+      if (stepRef.current === calledFromStep) setCodeErr(err?.message || 'Неверный код');
+    } finally { setVerifying(false); }
+  };
+
+  const handleResendEmailCode = async () => {
+    setResending(true);
+    try {
+      await sendEmailCode(email.trim());
+      resetCode(); setCodeErr('');
+      toast.success('Код отправлен повторно');
+    } catch (err: any) { toast.error(err?.message || 'Не удалось отправить код'); }
+    finally { setResending(false); }
   };
 
   const handleCreateCode = async () => {
@@ -425,6 +462,7 @@ export function EmailAuth() {
 
   const handleBack = () => {
     const prev: Partial<Record<Step, Step>> = {
+      email_code: 'email',
       create_code: 'email', enter_code: 'email', forgot: 'enter_code',
       register: 'email', login_found: 'email', role_conflict: 'email',
     };
@@ -476,7 +514,7 @@ export function EmailAuth() {
           <div className="flex items-center justify-center gap-2 mb-3">
             {[1, 2, 3].map(n => {
               const cur = step === 'email' ? 1
-                : (step === 'create_code' || step === 'enter_code') ? 2
+                : (step === 'create_code' || step === 'enter_code' || step === 'email_code') ? 2
                 : 3;
               return (
                 <div key={n}
@@ -556,6 +594,60 @@ export function EmailAuth() {
               <span>Продолжить</span>
               <ChevronRight className="w-5 h-5" />
             </CTAButton>
+          </>)}
+
+          {/* ══ STEP 2-0: Код из письма (только новый пользователь) ══ */}
+          {step === 'email_code' && (<>
+            <div className="flex items-center gap-3 pt-1">
+              <div className="relative flex items-center justify-center shrink-0">
+                {[0, 1].map(i => (
+                  <motion.div
+                    key={i}
+                    className="absolute"
+                    initial={{ opacity: 0.4, scale: 1 }}
+                    animate={{ opacity: 0, scale: 1 + (i + 1) * 0.48 }}
+                    transition={{ duration: 1.8, delay: i * 0.65, repeat: Infinity, ease: 'easeOut' }}
+                  >
+                    <div style={{ width: 52, height: 52, border: '1.5px solid #5ba3f5', borderRadius: 16 }} />
+                  </motion.div>
+                ))}
+                <div className="relative z-10 flex items-center justify-center rounded-2xl"
+                  style={{ width: 52, height: 52, background: 'linear-gradient(135deg, #1d4ed8, #2563eb)', boxShadow: '0 6px 20px #1d4ed840' }}>
+                  <Mail className="w-6 h-6 text-white relative z-10" />
+                </div>
+              </div>
+              <div>
+                <h2 className="text-[20px] font-black text-white leading-tight">Код из письма</h2>
+                <p className="text-[12px] text-[#607080]">Отправили 6 цифр на вашу почту</p>
+              </div>
+            </div>
+
+            <EmailBadge email={email} tag="ПОДТВЕРЖДЕНИЕ" tagColor="#5ba3f5" />
+
+            <GlassCard className="flex flex-col gap-4">
+              <DigitRow
+                arr={code} setArr={setCode} refs={codeRefs}
+                show={showCode} onToggleShow={() => setShowCode(v => !v)}
+                label="Код из письма" codeErr={codeErr} onClearError={clearCodeErr}
+              />
+              {codeErr && <ErrorBanner msg={codeErr} />}
+            </GlassCard>
+
+            <CTAButton
+              onClick={handleVerifyEmailCode}
+              disabled={codeStr.length < 6}
+              loading={verifying} loadingText="Проверяем..."
+            >
+              <ShieldCheck className="w-4.5 h-4.5" style={{ width: 18, height: 18 }} />
+              <span>Подтвердить</span>
+            </CTAButton>
+
+            <button onClick={handleResendEmailCode} disabled={resending}
+              className="w-full h-12 rounded-2xl text-[13px] font-semibold text-[#607080] border border-white/[0.07] hover:border-white/[0.15] hover:text-white transition-all flex items-center justify-center gap-2">
+              {resending
+                ? <><div className="w-3.5 h-3.5 border-2 border-white/20 border-t-white/60 rounded-full animate-spin" /><span>Отправляем...</span></>
+                : 'Не пришло письмо? Отправить ещё раз'}
+            </button>
           </>)}
 
           {/* ══ STEP 2a: Create PIN ══ */}

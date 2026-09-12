@@ -215,6 +215,40 @@ ${preheader ? `<div style="display:none;max-height:0;overflow:hidden;mso-hide:al
 }
 
 // ── 1. Добро пожаловать ───────────────────────────────────────────────────────
+/**
+ * Код подтверждения почты при входе (6 цифр).
+ * Код не выносим в тему письма — она видна в уведомлениях на заблокированном экране.
+ */
+export function loginCodeTemplate(params: {
+  code: string;
+  email?: string;
+  ttlMinutes?: number;
+}): { subject: string; html: string } {
+  const ttl = params.ttlMinutes ?? 10;
+
+  const content = `
+<div class="body">
+  <h1>Код для входа</h1>
+  <p class="subtitle">
+    Введите этот код на сайте, чтобы подтвердить почту и продолжить вход.
+  </p>
+  <div style="margin:28px 0;text-align:center;">
+    <div style="display:inline-block;padding:18px 34px;border-radius:14px;background:#0d1b2e;border:1px solid #1e3a55;">
+      <span style="font-size:34px;font-weight:800;letter-spacing:10px;color:#5ba3f5;font-family:'Courier New',monospace;">${params.code}</span>
+    </div>
+  </div>
+  <p class="subtitle" style="font-size:13px;">
+    Код действует ${ttl} минут и подходит только для одного входа.
+    Если вы не запрашивали вход — просто проигнорируйте это письмо, никаких действий не требуется.
+  </p>
+</div>`;
+
+  return {
+    subject: 'Ovora Cargo — код для входа',
+    html: layout(content, 'Код для входа в Ovora Cargo', params.email),
+  };
+}
+
 export function welcomeTemplate(params: {
   firstName: string;
   role: "driver" | "sender";
