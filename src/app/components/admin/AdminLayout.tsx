@@ -99,10 +99,17 @@ export function AdminLayout() {
   );
   const [idleWarningSecs, setIdleWarningSecs] = useState<number | null>(null);
   const adminRole = (sessionStorage.getItem('ovora_admin_role') || 'super-admin') as 'super-admin' | 'cargo-admin' | 'avia-admin';
+  // Три роли — три непересекающихся набора разделов:
+  //   super-admin (директор) — всё, включая «Общее» (реклама, чёрный список,
+  //     коды доступа, настройки сайта) — это настройки всей платформы;
+  //   cargo-admin — только своя площадка;
+  //   avia-admin  — только своя площадка.
+  // Раньше cargo-admin видел ещё и «Общее», из-за чего сотрудник CARGO мог
+  // менять общеплатформенные настройки, а роли были несимметричны.
   const visibleNavGroups = navGroups.filter(group => {
     if (adminRole === 'super-admin') return true;
-    if (adminRole === 'cargo-admin') return group.label !== 'AVIA';
-    if (adminRole === 'avia-admin') return group.label === 'Главная' || group.label === 'AVIA';
+    if (adminRole === 'cargo-admin') return group.label === 'Главная' || group.label === 'CARGO';
+    if (adminRole === 'avia-admin')  return group.label === 'Главная' || group.label === 'AVIA';
     return true;
   });
 

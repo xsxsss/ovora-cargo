@@ -168,6 +168,23 @@ app.use('/make-server-4e36197a/admin/*', async (c, next) => {
   return await requireRole(['cargo-admin'])(c, next);
 });
 
+// ── Общеплатформенные разделы — только главный админ (директор) ──────────────
+// Реклама, чёрный список и коды доступа относятся ко всей платформе, а не к
+// одной площадке, поэтому сотрудникам CARGO их не открываем: иначе скрытие
+// раздела в меню ничего не даёт — API остаётся доступным напрямую.
+// /admin/settings сюда НЕ входит: это настройки CARGO (см. Settings.tsx).
+const GENERAL_ADMIN_PREFIXES = [
+  '/make-server-4e36197a/admin/ads',
+  '/make-server-4e36197a/admin/blacklist',
+  '/make-server-4e36197a/admin/codes',
+];
+app.use('/make-server-4e36197a/admin/*', async (c, next) => {
+  if (!GENERAL_ADMIN_PREFIXES.some(p => c.req.path.startsWith(p))) {
+    return await next();
+  }
+  return await requireRole(['super-admin'])(c, next);
+});
+
 // Защищаем все /kv/* маршруты (они очень опасны — прямой доступ к БД)
 app.use('/make-server-4e36197a/kv/*', requireAdminChecked);
 
