@@ -13,7 +13,6 @@ import type { Context } from "npm:hono";
 import * as kv from "./kv_store.tsx";
 import * as bcrypt from "npm:bcryptjs";
 import { signUserToken } from "./userAuth.tsx";
-import { sendEmail, loginCodeTemplate } from "./email.tsx";
 
 const MAX_ATTEMPTS = 10;
 const BCRYPT_ROUNDS = 12; // Высокий cost-фактор = медленный брутфорс
@@ -95,17 +94,20 @@ export async function handleEmailCheck(c: Context) {
 //  Без этого шага любой мог занять чужой, ещё не зарегистрированный email.
 // ══════════════════════════════════════════════════════════════════════════════
 
-const CODE_TTL_MS      = 10 * 60 * 1000; // код живёт 10 минут
 const VERIFIED_TTL_MS  = 15 * 60 * 1000; // окно на установку PIN после подтверждения
-const MAX_CODE_ATTEMPTS = 5;
 
-const emailCodeKey     = (email: string) => `ovora:email_login_code:${email}`;
 const emailVerifiedKey = (email: string) => `ovora:email_verified:${email}`;
 
-/** 6 цифр из криптостойкого источника (не Math.random). */
-function generateSixDigits(): string {
-  const n = crypto.getRandomValues(new Uint32Array(1))[0] % 1_000_000;
-  return String(n).padStart(6, "0");
+// Письмо с кодом отправляет сам Supabase Auth (GoTrue) через SMTP, настроенный
+// в дашборде: Authentication → Emails → SMTP Settings. Свой генератор кода и
+// Resend здесь не нужны — код выпускает и проверяет Supabase.
+// ⚠️ В шаблоне письма обязателен {{ .Token }}, иначе придёт ссылка, а не 6 цифр.
+function gotrueUrl(path: string): string {
+  return `${(Deno.env.get('SUPABASE_URL') || '').replace(/\/$/, '')}/auth/v1${path}`;
+}
+function gotrueHeaders(): Record<string, string> {
+  const anon = Deno.env.get('SUPABASE_ANON_KEY') || '';
+  return { 'Content-Type': 'application/json', apikey: anon, Authorization: `Bearer ${anon}` };
 }
 
 export async function handleSendEmailCode(c: Context) {
@@ -128,25 +130,21 @@ export async function handleSendEmailCode(c: Context) {
       return c.json({ success: false, error: "Ваш аккаунт заблокирован. Обратитесь в поддержку.", blocked: true }, 403);
     }
 
-    const code = generateSixDigits();
-    await kv.set(emailCodeKey(email), {
-      codeHash : await hashCode(code),
-      email,
-      expiresAt: Date.now() + CODE_TTL_MS,
-      attempts : 0,
+    // Просим Supabase выслать OTP — письмо уйдёт через настроенный им SMTP.
+    const res = await fetch(gotrueUrl('/otp'), {
+      method : 'POST',
+      headers: gotrueHeaders(),
+      body   : JSON.stringify({ email, create_user: true }),
     });
 
-    const tpl = loginCodeTemplate({ code, email, ttlMinutes: CODE_TTL_MS / 60_000 });
-    const sent = await sendEmail({ to: email, subject: tpl.subject, html: tpl.html });
-
-    if (!sent.success) {
-      // Письмо не ушло — честно говорим об этом, иначе пользователь ждёт код впустую.
-      console.error(`[PermCode] Не удалось отправить код на ${email}:`, sent.error);
-      return c.json({ success: false, error: 'Не удалось отправить письмо. Проверьте адрес или попробуйте позже.' }, 502);
+    if (!res.ok) {
+      const txt = await res.text().catch(() => '');
+      console.error(`[PermCode] Supabase OTP не отправлен (${res.status}): ${txt.slice(0, 200)}`);
+      return c.json({ success: false, error: 'Не удалось отправить код. Попробуйте позже.' }, 502);
     }
 
-    console.log(`[PermCode] 📧 Код входа отправлен на ${email}`);
-    return c.json({ success: true, expiresIn: CODE_TTL_MS / 1000 });
+    console.log(`[PermCode] 📧 Supabase OTP отправлен на ${email}`);
+    return c.json({ success: true });
 
   } catch (err) {
     console.log("Error POST /auth/send-email-code:", err);
@@ -162,32 +160,26 @@ export async function handleVerifyEmailCode(c: Context) {
 
     if (!email || !code) return c.json({ success: false, error: "Email и код обязательны" }, 400);
 
-    const stored: any = await kv.get(emailCodeKey(email));
-    if (!stored?.codeHash) {
-      return c.json({ success: false, error: "Код не найден. Запросите новый." });
-    }
-    if (Date.now() > stored.expiresAt) {
-      await kv.del(emailCodeKey(email));
-      return c.json({ success: false, error: "Срок действия кода истёк. Запросите новый." });
+    // Код выпустил Supabase — он же проверяет срок, попытки и одноразовость.
+    const res = await fetch(gotrueUrl('/verify'), {
+      method : 'POST',
+      headers: gotrueHeaders(),
+      body   : JSON.stringify({ email, token: code, type: 'email' }),
+    });
+
+    if (!res.ok) {
+      const data: any = await res.json().catch(() => ({}));
+      const raw = data?.msg || data?.error_description || data?.error || '';
+      // GoTrue отвечает по-английски — показываем пользователю понятный текст.
+      const msg = /expired|invalid/i.test(raw) ? 'Неверный или просроченный код' : (raw || 'Неверный код');
+      console.log(`[PermCode] OTP не подтверждён (${res.status}): ${raw}`);
+      return c.json({ success: false, error: msg });
     }
 
-    const attempts = (stored.attempts || 0) + 1;
-    if (attempts > MAX_CODE_ATTEMPTS) {
-      await kv.del(emailCodeKey(email));
-      return c.json({ success: false, error: "Превышен лимит попыток. Запросите новый код." });
-    }
-
-    if (!(await verifyCode(code, stored.codeHash))) {
-      await kv.set(emailCodeKey(email), { ...stored, attempts });
-      const left = MAX_CODE_ATTEMPTS - attempts;
-      return c.json({ success: false, error: `Неверный код. Осталось попыток: ${left}`, attemptsLeft: left });
-    }
-
-    // Код одноразовый: удаляем и выдаём короткоживущее подтверждение почты.
-    await kv.del(emailCodeKey(email));
+    // Почта подтверждена — выдаём короткоживущий флаг, его требует set-code.
     await kv.set(emailVerifiedKey(email), { email, until: Date.now() + VERIFIED_TTL_MS });
 
-    console.log(`[PermCode] ✅ Почта подтверждена: ${email}`);
+    console.log(`[PermCode] ✅ Почта подтверждена через Supabase OTP: ${email}`);
     return c.json({ success: true });
 
   } catch (err) {
