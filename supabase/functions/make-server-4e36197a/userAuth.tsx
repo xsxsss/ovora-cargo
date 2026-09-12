@@ -9,19 +9,13 @@
 // Supabase anon key), а verifyUserActor() сверяет владельца токена с заявленным
 // в запросе callerEmail.
 //
-// 🔒 Требует секрет USER_JWT_SECRET в Supabase Secrets.
-//
-// Отсутствие секрета БОЛЬШЕ НЕ означает «доверять callerEmail из тела запроса».
-// Раньше это был fail-open, и удаление секрета молча возвращало IDOR по всем
-// CARGO-эндпоинтам. Теперь без секрета проверка владельца отклоняет запрос, а
-// прежнее поведение включается только явным USER_AUTH_LEGACY_OPEN=1 (аварийный
-// рычаг на случай, если функция задеплоена раньше, чем добавлен секрет).
+// 🔒 Требует секрет USER_JWT_SECRET в Supabase Secrets. Пока он не настроен,
+// verifyUserActor() работает в legacy-режиме (пропускает любой callerEmail без
+// проверки) — иначе продакшен сломался бы для всех пользователей до того, как
+// секрет будет добавлен и фронт начнёт присылать токен.
 import { SignJWT, jwtVerify } from "npm:jose";
 
 const TOKEN_TTL = '30d';
-
-/** Код в теле 401-ответа: клиент по нему понимает, что нужно перелогиниться. */
-export const USER_TOKEN_INVALID = 'USER_TOKEN_INVALID';
 
 function getSecret(): Uint8Array | null {
   const raw = (Deno.env.get('USER_JWT_SECRET') || '').trim();
@@ -31,26 +25,6 @@ function getSecret(): Uint8Array | null {
 /** true, если USER_JWT_SECRET настроен и токен-авторизация активна (не legacy-режим). */
 export function userAuthEnabled(): boolean {
   return getSecret() !== null;
-}
-
-/** Аварийный рычаг: доверять callerEmail из тела, пока секрет не настроен. */
-export function userLegacyOpen(): boolean {
-  return (Deno.env.get('USER_AUTH_LEGACY_OPEN') || '').trim() === '1';
-}
-
-/**
- * true, если проверки владельца должны применяться. Это ИЛИ настроенный секрет
- * (нормальный режим), ИЛИ отсутствие секрета без явного аварийного рычага —
- * в последнем случае getCallerEmail() вернёт null и владелец не подтвердится
- * ни для кого, что и есть fail-closed.
- */
-export function userAuthEnforced(): boolean {
-  return userAuthEnabled() || !userLegacyOpen();
-}
-
-/** Единый 401-ответ для проваленной проверки владельца сессии. */
-export function userUnauthorized(c: any) {
-  return c.json({ error: 'Unauthorized', code: USER_TOKEN_INVALID }, 401);
 }
 
 function normEmail(email: string): string {
@@ -91,15 +65,11 @@ export async function verifiedEmailFromToken(c: any): Promise<string | null> {
 /**
  * Проверяет, что claimedEmail (то, что клиент передал как «это я») действительно
  * принадлежит владельцу токена X-User-Token.
- * Секрет не настроен → отказ, кроме случая USER_AUTH_LEGACY_OPEN=1.
+ * Legacy-режим (секрет не настроен) — пропускает без проверки.
  */
 export async function verifyUserActor(c: any, claimedEmail: string): Promise<boolean> {
   const secret = getSecret();
-  if (!secret) {
-    if (userLegacyOpen()) return true;
-    console.error('[User Auth] USER_JWT_SECRET not configured — запрос отклонён (fail-closed)');
-    return false;
-  }
+  if (!secret) return true;
   if (!claimedEmail) return false;
 
   const token = (c.req.header('X-User-Token') || '').trim();

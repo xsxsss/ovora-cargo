@@ -60,12 +60,7 @@ npm run build && npm run preview   # http://localhost:4173
 | `src/styles/index.css` | CSS Grid Welcome-страницы, анимации |
 | `src/app/i18n/translations.ts` | Переводы ru/tj/en (144 ключа) |
 | `src/vite-env.d.ts` | TypeScript global declarations |
-| `supabase/functions/make-server-4e36197a/index.ts` | Ядро backend API (~8900 строк) |
-| `supabase/functions/make-server-4e36197a/aviaRoutes.tsx` | AVIA-эндпоинты |
-| `supabase/functions/make-server-4e36197a/adminAuth.tsx` | RBAC админки |
-| `supabase/functions/make-server-4e36197a/aviaAuth.tsx` | Session-JWT AVIA (`X-Avia-Token`) |
-| `supabase/functions/make-server-4e36197a/userAuth.tsx` | Session-JWT CARGO (`X-User-Token`) |
-| `src/app/api/sessionGuard.ts` | Ловит 401 «токен отвергнут» → принудительный перелогин |
+| `supabase/functions/make-server-4e36197a/index.ts` | Весь backend API (~7300 строк) |
 | `supabase/functions/make-server-4e36197a/rateLimit.tsx` | Token bucket rate limiter |
 | `supabase/functions/make-server-4e36197a/kv_store.tsx` | KV абстракция |
 | `supabase/functions/make-server-4e36197a/email.tsx` | Email шаблоны |
@@ -152,39 +147,14 @@ X-Admin-Token: <jwt>          // payload: { role: 'super-admin' | 'cargo-admin' 
 | `ADMIN_ACCESS_CODE` | Пароль для `/admin/auth` → роль `super-admin` |
 | `ADMIN_ACCESS_CODE_CARGO` | Пароль для роли `cargo-admin` (опционально, RBAC) |
 | `ADMIN_ACCESS_CODE_AVIA` | Пароль для роли `avia-admin` (опционально, RBAC) |
-| `ADMIN_JWT_SECRET` | Секрет для подписи admin-JWT (`X-Admin-Token`, минимум 32 символа) |
+| `ADMIN_JWT_SECRET` | Секрет для подписи JWT токенов (минимум 32 символа) |
 | `AVIA_JWT_SECRET` | Секрет для подписи AVIA session-токенов (`X-Avia-Token`, минимум 32 символа) |
-| `USER_JWT_SECRET` | Секрет для подписи CARGO session-токенов (`X-User-Token`, минимум 32 символа) |
-| `AVIA_AUTH_LEGACY_OPEN` | `1` — аварийно отключить проверку владельца в AVIA. Держать незаданным |
-| `USER_AUTH_LEGACY_OPEN` | `1` — аварийно отключить проверку владельца в CARGO. Держать незаданным |
 | `YANDEX_GEOCODER_API_KEY` | Yandex Geocoder API |
 | `OCR_SPACE_API_KEY` | OCR.space для распознавания документов |
 
-**Критично — порядок включения секретов:**
-
-`AVIA_JWT_SECRET` и `USER_JWT_SECRET` работают **fail-closed**: пока секрет не
-задан, проверки владельца отклоняют запрос. Раньше было наоборот (fail-open —
-пропускали всех), и удаление секрета молча снимало защиту.
-
-Действующие сессии лежат в браузере 30 дней и не содержат токена, поэтому
-включать секрет нужно **после** того, как на прод выкачен фронтенд с
-`src/app/api/sessionGuard.ts` — он ловит 401 с кодом `AVIA_TOKEN_INVALID` /
-`USER_TOKEN_INVALID`, разлогинивает и отправляет на вход. Без него человек
-остаётся «залогиненным» с нерабочими запросами до конца TTL.
-
-Порядок: **фронт на Pages → секреты в Supabase → деплой edge function.**
-Если функция уже задеплоена, а секрета ещё нет — задать `AVIA_AUTH_LEGACY_OPEN=1`
-/ `USER_AUTH_LEGACY_OPEN=1` как временный рычаг и снять сразу после добавления
-секрета. Проверить текущее состояние: `GET /admin/security-status` (super-admin).
-
-`ADMIN_JWT_SECRET` включается независимо и ничего не ломает: без него `/admin/auth`
-не выдаёт токен и работает только legacy `X-Admin-Code` (всегда `super-admin`,
-без TTL и без возможности отзыва), а роли `cargo-admin`/`avia-admin` недоступны.
-
-**Известные слабые места (не закрыты):**
-- Код админки — 6 цифр (`AdminAuthGate.tsx` принимает ровно 6 символов), это 10⁶ вариантов.
-- `rateLimit.tsx` держит счётчики в памяти изолята. В Supabase Edge Functions изолятов много и они эфемерны, поэтому реальный лимит на брутфорс заметно слабее заявленных 15 запросов / 5 мин.
-- `verifyUserActor()` в `userAuth.tsx` нигде не вызывается — CARGO использует `getCallerEmail()`; функция осталась как API и покрыта тестами.
+**Критично:**
+- `ADMIN_JWT_SECRET` ещё не добавлен в Supabase Secrets — без него JWT не выдаётся, работает только legacy `X-Admin-Code` (роль `super-admin`). Роли `cargo-admin`/`avia-admin` недоступны, пока не настроены `ADMIN_JWT_SECRET` + соответствующий `ADMIN_ACCESS_CODE_*`.
+- `AVIA_JWT_SECRET` ещё не добавлен в Supabase Secrets — без него `verifyAviaActor()` в `aviaAuth.tsx` работает в legacy-режиме (пропускает все проверки без подтверждения личности), т.е. защита от подмены `callerPhone` в AVIA-эндпоинтах **не действует**, пока секрет не настроен.
 
 ---
 
@@ -217,7 +187,7 @@ npm run typecheck   # tsc --noEmit — 0 ошибок
 npm run build       # сборка через Vite/esbuild — не делает type-check
 ```
 
-- `tsconfig.json` создан с `strict: true`, без `baseUrl` (TS 7 его убирает, и сейчас он валит `tsc` фатальной ошибкой конфига — она маскировала все остальные)
+- `tsconfig.json` создан с `strict: true`
 - `typescript`, `@types/react`, `@types/react-dom` установлены в devDependencies
 - CI запускает `typecheck` перед build (non-blocking: `|| true`)
 - Известный реальный баг исправлен: `TripDetail` — отсутствовал `useNavigate()`
@@ -255,18 +225,12 @@ npm run build       # сборка через Vite/esbuild — не делает
 ## Команды
 
 ```bash
-# react-yandex-maps@4.6 требует React ≤16, проект на React 18 — без флага
-# npm ci падает с ERESOLVE. CI ставит зависимости так же.
-npm ci --legacy-peer-deps
-
 npm run dev          # dev сервер
 npm run build        # production build → dist/
-npm run typecheck    # TypeScript проверка — 0 ошибок
-npm run test         # vitest (src/**/*.test.* + supabase/**/*.test.*)
-npm run lint         # eslint — 0 errors, warnings есть
+npm run typecheck    # TypeScript проверка
 
 # Деплой
-git push origin HEAD:main   # → GitHub Actions → Pages
+vercel --prod        # задеплоить на https://dly-a-prid.vercel.app
 ```
 
 ---
@@ -277,5 +241,4 @@ git push origin HEAD:main   # → GitHub Actions → Pages
 2. **`callerEmail` обязателен** во всех write-операциях (cargos, offers, reviews, chats)
 3. **Переводы**: добавляй ключи сразу в `ru` + `tj` + `en`
 4. **Inline скрипты в `index.html` запрещены** — CSP без `unsafe-inline` для скриптов
-5. **Деплой фронта — только через `git push` в `main`** (GitHub Actions → Pages). Vercel-проект `dly-a-prid` заблокирован вместе со старым аккаунтом, `vercel --prod` не работает
-6. **Не возвращать fail-open в проверки владельца** — `aviaAuth.tsx` / `userAuth.tsx` отклоняют запрос, если секрет не задан
+5. **GitHub не используется** — работаем локально, деплой только через `vercel --prod`

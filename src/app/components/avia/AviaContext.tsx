@@ -1,7 +1,6 @@
 import React, { createContext, useContext, useState, useEffect, useRef, useCallback, ReactNode } from 'react';
 import type { AviaUser, AviaNotification } from '../../api/aviaApi';
 import { getAviaSession, saveAviaSession, clearAviaSession, getAviaProfile, getAviaNotifications, checkAviaUnread } from '../../api/aviaApi';
-import { AVIA_SESSION_EXPIRED_EVENT } from '../../api/sessionGuard';
 import { getAviaUserChats } from '../../api/aviaChatApi';
 
 // ── Типы ─────────────────────────────────────────────────────────────────────
@@ -173,19 +172,6 @@ export function AviaProvider({ children }: { children: ReactNode }) {
     prevUnreadRef.current = -1;
     clearAviaSession();
   }, []);
-
-  // ── Принудительный выход: бэкенд отверг токен сессии ────────────────────────
-  // Срабатывает, когда на сервере включили AVIA_JWT_SECRET, а в браузере лежит
-  // старая сессия без токена (или токен протух/отозван). Без этого TTL в 30 дней
-  // держал бы пользователя «залогиненным» с нерабочими запросами.
-  useEffect(() => {
-    const onExpired = () => {
-      if (!getAviaSession() && !user) return;
-      logout();
-    };
-    window.addEventListener(AVIA_SESSION_EXPIRED_EVENT, onExpired);
-    return () => window.removeEventListener(AVIA_SESSION_EXPIRED_EVENT, onExpired);
-  }, [logout, user]);
 
   // ── Периодическая проверка TTL локальной сессии ─────────────────────────────
   // getAviaSession() сам удаляет протухшую запись и возвращает null, но без

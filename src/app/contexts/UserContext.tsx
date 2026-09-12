@@ -1,6 +1,5 @@
-import React, { createContext, useContext, useState, useEffect, useCallback, ReactNode } from 'react';
+import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
 import * as userApi from '../api/userApi';
-import { USER_SESSION_EXPIRED_EVENT } from '../api/sessionGuard';
 
 interface User {
   email: string;
@@ -169,32 +168,15 @@ export function UserProvider({ children }: { children: ReactNode }) {
   };
 
   // ── Выход из системы ───────────────────────────────────────────────────────
-  const logout = useCallback(() => {
+  const logout = () => {
     // ✅ Полностью чистим все сессионные данные
     sessionStorage.removeItem('ovora_user_email');
     sessionStorage.removeItem('userRole');
     sessionStorage.removeItem('isAuthenticated');
-    // Токен сессии (X-User-Token) — иначе он переживает выход и уходит
-    // в заголовках следующего, уже чужого входа в этом же браузере.
-    try { localStorage.removeItem('ovora_user_token'); } catch { /* ignore */ }
     clearLocalCache();
     setUser(null);
     setCurrentEmail(null);
-  }, []);
-
-  // ── Принудительный выход: бэкенд отверг токен сессии ────────────────────────
-  // Срабатывает, когда на сервере включили USER_JWT_SECRET, а в браузере лежит
-  // старая сессия без токена (или токен протух). Перезагрузка страницы нужна,
-  // чтобы отработали loader-гварды роутера: они читают storage и уводят на вход.
-  useEffect(() => {
-    const onExpired = () => {
-      logout();
-      const home = import.meta.env.BASE_URL || '/';
-      if (window.location.pathname !== home) window.location.assign(home);
-    };
-    window.addEventListener(USER_SESSION_EXPIRED_EVENT, onExpired);
-    return () => window.removeEventListener(USER_SESSION_EXPIRED_EVENT, onExpired);
-  }, [logout]);
+  };
 
   // ── При монтировании — читаем email из sessionStorage ─────────────────────
   useEffect(() => {

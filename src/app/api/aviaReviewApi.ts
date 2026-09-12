@@ -1,7 +1,6 @@
 import { projectId, publicAnonKey } from '../../../utils/supabase/info';
 import { CSRF_HEADER, CSRF_TOKEN } from './csrfToken';
 import { getAviaSession } from './aviaApi';
-import { aviaFetch } from './sessionGuard';
 
 const BASE = `https://${projectId}.supabase.co/functions/v1/make-server-4e36197a`;
 const BASE_HEADERS = {
@@ -59,7 +58,7 @@ export async function createAviaReview(params: {
   comment: string;
 }): Promise<{ success: boolean; review?: AviaReview; error?: string }> {
   try {
-    const res = await aviaFetch(`${BASE}/avia/reviews`, {
+    const res = await fetch(`${BASE}/avia/reviews`, {
       method: 'POST',
       headers: getHeaders(),
       body: JSON.stringify({
@@ -80,7 +79,7 @@ export async function createAviaReview(params: {
 export async function getAviaDealReviewStatusBatch(dealIds: string[]): Promise<Record<string, AviaDealReviewedStatus>> {
   if (dealIds.length === 0) return {};
   try {
-    const res = await aviaFetch(`${BASE}/avia/reviews/deal-batch`, {
+    const res = await fetch(`${BASE}/avia/reviews/deal-batch`, {
       method: 'POST',
       headers: getHeaders(),
       body: JSON.stringify({ dealIds }),
@@ -97,7 +96,7 @@ export async function getAviaDealReviewStatusBatch(dealIds: string[]): Promise<R
 export async function getAviaUserReviews(phone: string): Promise<AviaReview[]> {
   try {
     const clean = phone.replace(/\D/g, '');
-    const res = await aviaFetch(`${BASE}/avia/reviews/user/${encodeURIComponent(clean)}`, {
+    const res = await fetch(`${BASE}/avia/reviews/user/${encodeURIComponent(clean)}`, {
       headers: getHeaders(),
     });
     if (!res.ok) return [];
@@ -115,7 +114,7 @@ export async function getAviaPublicProfile(phone: string): Promise<{
 } | null> {
   try {
     const clean = phone.replace(/\D/g, '');
-    const res = await aviaFetch(`${BASE}/avia/public-profile/${encodeURIComponent(clean)}`, {
+    const res = await fetch(`${BASE}/avia/public-profile/${encodeURIComponent(clean)}`, {
       headers: getHeaders(),
     });
     if (!res.ok) return null;

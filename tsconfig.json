@@ -15,8 +15,7 @@
     "noUnusedLocals": false,
     "noUnusedParameters": false,
     "noFallthroughCasesInSwitch": true,
-    // baseUrl не нужен: пути в "paths" уже относительные (./src/*), а с TS 7
-    // сам параметр перестанет работать и сейчас валит tsc как deprecated.
+    "baseUrl": ".",
     "paths": {
       "@/*": ["./src/*"]
     }

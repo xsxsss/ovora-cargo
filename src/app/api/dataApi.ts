@@ -1,6 +1,5 @@
 import { projectId, publicAnonKey } from '../../../utils/supabase/info';
 import { CSRF_HEADER, CSRF_TOKEN } from './csrfToken';
-import { cargoFetch } from './sessionGuard';
 
 const BASE = `https://${projectId}.supabase.co/functions/v1/make-server-4e36197a`;
 
@@ -83,7 +82,7 @@ async function reqWithRetry(method: string, path: string, body?: any, attempts =
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 12000); // 12s timeout
     try {
-      const res = await cargoFetch(`${BASE}${path}`, {
+      const res = await fetch(`${BASE}${path}`, {
         method,
         headers: getHeaders(path, body instanceof FormData),
         body: body instanceof FormData ? body : body ? JSON.stringify(body) : undefined,
