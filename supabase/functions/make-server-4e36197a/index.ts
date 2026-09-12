@@ -3460,13 +3460,40 @@ function detectDocumentType(text: string): string {
   ];
   
   const passportMatchCount = passportKeywords.filter(keyword => lowerText.includes(keyword)).length;
-  
+
+  // ═══════════════════════════════════════════════════════════════════
+  // 🛡️ СТРАХОВКА (ОСАГО / страховой полис)
+  // ═══════════════════════════════════════════════════════════════════
+  const insuranceKeywords = [
+    'осаго',
+    'каско',
+    'страхов',          // страховой, страховка, страхование, страховщик, страхователь
+    'полис',
+    'insurance',
+    'policy',
+    'суғурта',
+    'страховая сумма',
+    'страховая премия',
+    'срок страхования',
+  ];
+
+  const insuranceMatchCount = insuranceKeywords.filter(keyword => lowerText.includes(keyword)).length;
+
   console.log('[DocumentTypeDetector] Match counts:', {
     passport: passportMatchCount,
     driverLicense: driverLicenseMatchCount,
     vehicle: vehicleMatchCount,
+    insurance: insuranceMatchCount,
   });
-  
+
+  // Страховку проверяем первой: в полисе ОСАГО тоже есть VIN, марка и модель,
+  // поэтому по общим словам он определился бы как техпаспорт. Слова «осаго»,
+  // «полис», «страхов…» специфичны, поэтому порога в 2 совпадения достаточно.
+  if (insuranceMatchCount >= 2) {
+    console.log('[DocumentTypeDetector] Detected: INSURANCE (страховой полис)');
+    return 'insurance';
+  }
+
   // Определяем тип по максимальному количеству совпадений
   if (vehicleMatchCount >= 3) {
     console.log('[DocumentTypeDetector] Detected: VEHICLE_REGISTRATION (техпаспорт)');
@@ -4276,6 +4303,7 @@ app.post("/make-server-4e36197a/documents/upload", async (c) => {
       'passport': ['passport'],
       'driver_license': ['driver_license'],
       'vehicle_registration': ['vehicle_registration'],
+      'insurance': ['insurance'],
     };
     
     const allowedTypes = documentTypeMap[documentType] || [];
@@ -4307,6 +4335,7 @@ app.post("/make-server-4e36197a/documents/upload", async (c) => {
         'passport': 'Паспорт',
         'driver_license': 'Водительское удостоверение',
         'vehicle_registration': 'Техпаспорт (свидетельство о регистрации ТС)',
+        'insurance': 'Страховой полис (ОСАГО)',
       };
       
       const expectedName = typeNames[documentType] || documentType;
