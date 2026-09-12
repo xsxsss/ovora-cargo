@@ -23,7 +23,10 @@ export type AviaAuditAction =
   | 'deal.pod_upload' | 'deal.delete' | 'deal.admin_delete'
   | 'chat.delete'
   | 'blacklist.admin_remove'
-  | 'settings.admin_update';
+  | 'settings.admin_update'
+  // Сквозной журнал админки: вход в панель и любое изменяющее обращение
+  // к /avia/admin/*, которое обработчик не залогировал подробно.
+  | 'admin.login' | 'admin.request';
 
 export interface AviaAuditEntry {
   id        : string;
@@ -32,7 +35,7 @@ export interface AviaAuditEntry {
   actorPhone: string;
   /** Затронутый объект (dealId / flightId / phone пользователя) */
   targetId  ?: string;
-  targetType?: 'deal' | 'flight' | 'user' | 'chat' | 'blacklist' | 'settings';
+  targetType?: 'deal' | 'flight' | 'user' | 'chat' | 'blacklist' | 'settings' | 'session' | 'request';
   details   ?: Record<string, unknown>;
 }
 

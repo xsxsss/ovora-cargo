@@ -27,7 +27,10 @@ export type CargoAuditAction =
   | 'cargo.create' | 'cargo.edit' | 'cargo.delete'
   | 'offer.create'
   | 'review.create'
-  | 'tracking.status_change' | 'tracking.pod_upload';
+  | 'tracking.status_change' | 'tracking.pod_upload'
+  // Сквозной журнал админки: вход в панель и любое изменяющее обращение
+  // к /admin/*, которое обработчик не залогировал подробно.
+  | 'admin.login' | 'admin.request';
 
 export interface CargoAuditEntry {
   id        : string;
@@ -36,7 +39,7 @@ export interface CargoAuditEntry {
   /** Email актора — реальный email пользователя для user-действий, либо `admin:<role>` для admin-действий */
   actorEmail: string;
   targetId  ?: string;
-  targetType?: 'cargo' | 'offer' | 'review' | 'document' | 'settings' | 'user' | 'blacklist' | 'trip' | 'ad' | 'tracking';
+  targetType?: 'cargo' | 'offer' | 'review' | 'document' | 'settings' | 'user' | 'blacklist' | 'trip' | 'ad' | 'tracking' | 'session' | 'request';
   details   ?: Record<string, unknown>;
 }
 

@@ -19,6 +19,7 @@ import { calculateAverageRating } from "./rating.tsx";
 import * as kv from "./kv_store.tsx";
 import { Blacklist } from "./blacklist.tsx";
 import { AuditLog as CargoAuditLog } from "./cargoAudit.tsx";
+import { AuditLog as AviaAuditLog } from "./aviaAudit.tsx";
 import { handleSendOtp, handleVerifyOtp } from "./otp.tsx";
 import { handleGenerateBackup, handleVerifyBackup, handleBackupExists } from "./backup.tsx";
 import { handleEmailCheck, handleSetCode, handleVerifyPermCode, handleResetCode, handleAdminListCodes, handleSendEmailCode, handleVerifyEmailCode } from "./permCode.tsx";
@@ -139,6 +140,65 @@ async function requireAdminChecked(c: any, next: any) {
   return await requireAdmin(c, next, isAdminJwtRevoked);
 }
 
+// Кто именно выполнил админ-действие — роль из проверенного токена.
+// Без неё в журнале стоит просто «admin», и нельзя понять, директор это был
+// или сотрудник площадки. Роль ставит requireAdmin (c.set('adminRole', …)).
+//
+// Побочный эффект: помечаем запрос как «залогирован подробно», чтобы сквозной
+// журнал (auditFallback ниже) не продублировал его строкой admin.request.
+// Инвариант: adminActor вызывается ТОЛЬКО внутри AuditLog.record(...).
+function adminActor(c: any): string {
+  c.set('auditLogged', true);
+  return `admin:${c.get('adminRole') || 'unknown'}`;
+}
+
+// ── Сквозной журнал админки ──────────────────────────────────────────────────
+// Подробные записи расставлены вручную и покрывают не все эндпоинты — новый
+// раздел админки легко забыть залогировать, и тогда действие исчезает из
+// журнала совсем. Этот перехват пишет ЛЮБОЕ изменяющее обращение к админке
+// (POST/PUT/PATCH/DELETE), если обработчик не сделал подробную запись сам.
+// Ставится ПОСЛЕ проверок доступа, поэтому в журнал попадают только запросы
+// с подтверждённой ролью, а не анонимные попытки входа.
+// Вход в админку — отдельная запись: сквозной журнал её не видит, потому что
+// /admin/auth идёт до проверки прав. Пишем и удачные, и неудачные попытки —
+// по ним видно подбор кода. Запись уходит в журнал той площадки, к которой
+// относится роль (avia-admin → AVIA, остальные → CARGO).
+async function recordAdminLogin(c: any, role: 'super-admin' | 'cargo-admin' | 'avia-admin' | null) {
+  const actor   = `admin:${role || 'unknown'}`;
+  const details = {
+    ok       : !!role,
+    ip       : c.req.header('x-forwarded-for') || 'unknown',
+    userAgent: (c.req.header('user-agent') || '').slice(0, 200),
+  };
+  if (role === 'avia-admin') {
+    await AviaAuditLog.record({ action: 'admin.login', actorPhone: actor, targetType: 'session', details });
+  } else {
+    await CargoAuditLog.record({ action: 'admin.login', actorEmail: actor, targetType: 'session', details });
+  }
+}
+
+function auditFallback(platform: 'cargo' | 'avia') {
+  return async (c: any, next: any) => {
+    await next();
+    try {
+      const method = c.req.method;
+      if (method === 'GET' || method === 'HEAD' || method === 'OPTIONS') return;
+      if (c.get('auditLogged')) return;
+      const actor = `admin:${c.get('adminRole') || 'unknown'}`;
+      const path   = c.req.path.replace('/make-server-4e36197a', '');
+      const status = c.res?.status ?? 0;
+      const details = { method, status };
+      if (platform === 'cargo') {
+        await CargoAuditLog.record({ action: 'admin.request', actorEmail: actor, targetId: path, targetType: 'request', details });
+      } else {
+        await AviaAuditLog.record({ action: 'admin.request', actorPhone: actor, targetId: path, targetType: 'request', details });
+      }
+    } catch (e) {
+      console.warn('[auditFallback] non-fatal:', e);
+    }
+  };
+}
+
 // ── callerEmail: prefer JWT, fallback to body (legacy) ─────────────────────
 // Когда USER_JWT_SECRET настроен, доверяем ТОЛЬКО email из проверенного токена
 // (его ставит user-auth middleware ниже). Значение callerEmail из тела запроса
@@ -185,6 +245,13 @@ app.use('/make-server-4e36197a/admin/*', async (c, next) => {
   return await requireRole(['super-admin'])(c, next);
 });
 
+// Вход в админку логируется отдельно (в самом /admin/auth — там известна роль),
+// поэтому сквозной журнал его пропускает, чтобы не было двух записей.
+app.use('/make-server-4e36197a/admin/*', async (c, next) => {
+  if (c.req.path === '/make-server-4e36197a/admin/auth') return await next();
+  return await auditFallback('cargo')(c, next);
+});
+
 // Защищаем все /kv/* маршруты (они очень опасны — прямой доступ к БД)
 app.use('/make-server-4e36197a/kv/*', requireAdminChecked);
 
@@ -192,6 +259,7 @@ app.use('/make-server-4e36197a/kv/*', requireAdminChecked);
 // AVIA-эндпоинты доступны avia-admin и super-admin.
 app.use('/make-server-4e36197a/avia/admin/*', requireAdminChecked);
 app.use('/make-server-4e36197a/avia/admin/*', requireRole(['avia-admin']));
+app.use('/make-server-4e36197a/avia/admin/*', auditFallback('avia'));
 
 // ── Supabase client (for storage) ─────────────────────────────────────────────
 const supabase = createClient(
@@ -435,6 +503,7 @@ app.post("/make-server-4e36197a/admin/auth",
 
     if (!role) {
       console.log('[AdminAuth] Wrong admin code attempt');
+      await recordAdminLogin(c, null);
       return c.json({ success: false, error: 'Неверный код доступа' });
     }
 
@@ -461,6 +530,7 @@ app.post("/make-server-4e36197a/admin/auth",
       console.warn('[AdminAuth] ADMIN_JWT_SECRET not set — token not issued, legacy X-Admin-Code still works (super-admin only)');
     }
 
+    await recordAdminLogin(c, role);
     return c.json({ success: true, token, role });
   } catch (err) {
     console.log('Error POST /admin/auth:', err);
@@ -5014,7 +5084,7 @@ app.delete("/make-server-4e36197a/admin/cargos/:id", async (c) => {
         sendEmail({ to: existing.senderEmail, subject: tpl.subject, html: tpl.html }).catch(() => {});
       }
     }
-    await CargoAuditLog.record({ action: 'cargo.admin_delete', actorEmail: 'admin', targetId: id, targetType: 'cargo', details: { senderEmail: existing.senderEmail } });
+    await CargoAuditLog.record({ action: 'cargo.admin_delete', actorEmail: adminActor(c), targetId: id, targetType: 'cargo', details: { senderEmail: existing.senderEmail } });
     console.log(`[DELETE /admin/cargos] Admin removed cargo ${id}`);
     return c.json({ success: true });
   } catch (err) {
@@ -5042,8 +5112,7 @@ app.put("/make-server-4e36197a/admin/cargos/:id", async (c) => {
     const updated = { ...existing, ...updates, id, updatedAt: new Date().toISOString() };
     await kv.set(`ovora:cargo:${id}`, updated);
 
-    const adminRole = c.get('adminRole') || 'admin';
-    await CargoAuditLog.record({ action: 'cargo.admin_edit', actorEmail: `admin:${adminRole}`, targetId: id, targetType: 'cargo', details: { fields: Object.keys(updates) } });
+    await CargoAuditLog.record({ action: 'cargo.admin_edit', actorEmail: adminActor(c), targetId: id, targetType: 'cargo', details: { fields: Object.keys(updates) } });
     return c.json({ success: true, cargo: updated });
   } catch (err) {
     console.log("Error PUT /admin/cargos/:id:", err);
@@ -5102,7 +5171,7 @@ app.put("/make-server-4e36197a/admin/offers/:tripId/:offerId/status", async (c) 
       }
     }
 
-    await CargoAuditLog.record({ action: 'offer.admin_status_change', actorEmail: 'admin', targetId: `${tripId}:${offerId}`, targetType: 'offer', details: { status, previousStatus: existing.status } });
+    await CargoAuditLog.record({ action: 'offer.admin_status_change', actorEmail: adminActor(c), targetId: `${tripId}:${offerId}`, targetType: 'offer', details: { status, previousStatus: existing.status } });
     console.log(`[PUT /admin/offers] Admin set offer ${tripId}:${offerId} status to ${status}`);
     return c.json({ success: true, offer: updated });
   } catch (err) {
@@ -5136,7 +5205,7 @@ app.delete("/make-server-4e36197a/admin/reviews/:reviewId", async (c) => {
       }
     }
 
-    await CargoAuditLog.record({ action: 'review.admin_delete', actorEmail: 'admin', targetId: reviewId, targetType: 'review', details: { targetEmail: existing.targetEmail, authorEmail: existing.authorEmail } });
+    await CargoAuditLog.record({ action: 'review.admin_delete', actorEmail: adminActor(c), targetId: reviewId, targetType: 'review', details: { targetEmail: existing.targetEmail, authorEmail: existing.authorEmail } });
     console.log(`[DELETE /admin/reviews] Admin removed review ${reviewId}`);
     return c.json({ success: true });
   } catch (err) {
@@ -5219,8 +5288,7 @@ app.put("/make-server-4e36197a/admin/documents/:documentId/status", async (c) =>
         sendEmail({ to: userEmail, subject: tpl.subject, html: tpl.html }).catch(() => {});
       }
     }
-    const adminRole = c.get('adminRole') || 'admin';
-    await CargoAuditLog.record({ action: 'document.admin_status_change', actorEmail: `admin:${adminRole}`, targetId: documentId, targetType: 'document', details: { userEmail, status, notes } });
+    await CargoAuditLog.record({ action: 'document.admin_status_change', actorEmail: adminActor(c), targetId: documentId, targetType: 'document', details: { userEmail, status, notes } });
     console.log(`[admin/documents] ${documentId} for ${userEmail} → ${status}`);
     return c.json({ success: true, document: updated });
   } catch (err) {
@@ -5252,8 +5320,7 @@ app.delete("/make-server-4e36197a/admin/documents/:documentId", async (c) => {
     }
     await kv.del(docKey);
 
-    const adminRole = c.get('adminRole') || 'admin';
-    await CargoAuditLog.record({ action: 'document.admin_reset', actorEmail: `admin:${adminRole}`, targetId: documentId, targetType: 'document', details: { userEmail } });
+    await CargoAuditLog.record({ action: 'document.admin_reset', actorEmail: adminActor(c), targetId: documentId, targetType: 'document', details: { userEmail } });
     console.log(`[admin/documents] Сброшен документ ${documentId} у ${userEmail}`);
     return c.json({ success: true });
   } catch (err) {
@@ -5277,7 +5344,7 @@ app.put("/make-server-4e36197a/admin/settings", async (c) => {
   try {
     const body = await c.req.json();
     await kv.set("ovora:admin:settings", { ...body, updatedAt: new Date().toISOString() });
-    await CargoAuditLog.record({ action: 'settings.admin_update', actorEmail: 'admin', targetType: 'settings', details: { fields: Object.keys(body) } });
+    await CargoAuditLog.record({ action: 'settings.admin_update', actorEmail: adminActor(c), targetType: 'settings', details: { fields: Object.keys(body) } });
     return c.json({ success: true });
   } catch (err) {
     return c.json({ error: 'Внутренняя ошибка сервера' }, 500);
@@ -5305,7 +5372,7 @@ app.put("/make-server-4e36197a/admin/users/:email/status", async (c) => {
         sendEmail({ to: email, subject: tpl.subject, html: tpl.html }).catch(() => {});
       }
     }
-    await CargoAuditLog.record({ action: 'user.admin_status_change', actorEmail: 'admin', targetId: email, targetType: 'user', details: { status, previousStatus: existing.status } });
+    await CargoAuditLog.record({ action: 'user.admin_status_change', actorEmail: adminActor(c), targetId: email, targetType: 'user', details: { status, previousStatus: existing.status } });
     return c.json({ success: true, user: updated });
   } catch (err) {
     console.log("Error PUT /admin/users/:email/status:", err);
@@ -5334,7 +5401,7 @@ app.delete("/make-server-4e36197a/admin/users/:email", async (c) => {
         originalName: `${existing.firstName || ""} ${existing.lastName || ""}`.trim(),
       });
     }
-    await CargoAuditLog.record({ action: 'user.admin_delete', actorEmail: 'admin', targetId: email, targetType: 'user', details: { role: existing.role, blacklisted: cleanPhone.length >= 7 } });
+    await CargoAuditLog.record({ action: 'user.admin_delete', actorEmail: adminActor(c), targetId: email, targetType: 'user', details: { role: existing.role, blacklisted: cleanPhone.length >= 7 } });
     return c.json({ success: true, blacklisted: cleanPhone.length >= 7 });
   } catch (err) {
     console.log("Error DELETE /admin/users/:email:", err);
@@ -5357,7 +5424,7 @@ app.delete("/make-server-4e36197a/admin/blacklist/:phone", async (c) => {
   try {
     const phone = decodeURIComponent(c.req.param("phone"));
     await Blacklist.remove(phone);
-    await CargoAuditLog.record({ action: 'blacklist.admin_remove', actorEmail: 'admin', targetId: phone, targetType: 'blacklist' });
+    await CargoAuditLog.record({ action: 'blacklist.admin_remove', actorEmail: adminActor(c), targetId: phone, targetType: 'blacklist' });
     return c.json({ success: true });
   } catch (err) {
     console.log("Error DELETE /admin/blacklist/:phone:", err);
@@ -5419,7 +5486,7 @@ app.delete("/make-server-4e36197a/admin/trips/deleteAll", async (c) => {
         deleted++;
       }
     }
-    await CargoAuditLog.record({ action: 'trip.admin_delete_all', actorEmail: 'admin', targetType: 'trip', details: { deleted } });
+    await CargoAuditLog.record({ action: 'trip.admin_delete_all', actorEmail: adminActor(c), targetType: 'trip', details: { deleted } });
     console.log(`[admin] Deleted ${deleted} trips`);
     return c.json({ success: true, deleted });
   } catch (err) {
@@ -6212,7 +6279,7 @@ app.post("/make-server-4e36197a/admin/ads", requireAdminChecked, async (c) => {
       updatedAt: new Date().toISOString(),
     };
     await kv.set(`ovora:ad:${id}`, ad);
-    await CargoAuditLog.record({ action: 'ad.admin_create', actorEmail: 'admin', targetId: id, targetType: 'ad', details: { placement: ad.placement } });
+    await CargoAuditLog.record({ action: 'ad.admin_create', actorEmail: adminActor(c), targetId: id, targetType: 'ad', details: { placement: ad.placement } });
     console.log(`[admin/ads] Created ad ${id}, placement=${ad.placement}`);
     return c.json({ success: true, ad });
   } catch (err) {
@@ -6230,7 +6297,7 @@ app.put("/make-server-4e36197a/admin/ads/:id", requireAdminChecked, async (c) =>
     if (!existing) return c.json({ error: "Ad not found" }, 404);
     const updated = { ...existing, ...body, id, updatedAt: new Date().toISOString() };
     await kv.set(`ovora:ad:${id}`, updated);
-    await CargoAuditLog.record({ action: 'ad.admin_update', actorEmail: 'admin', targetId: id, targetType: 'ad', details: { fields: Object.keys(body) } });
+    await CargoAuditLog.record({ action: 'ad.admin_update', actorEmail: adminActor(c), targetId: id, targetType: 'ad', details: { fields: Object.keys(body) } });
     console.log(`[admin/ads] Updated ad ${id}`);
     return c.json({ success: true, ad: updated });
   } catch (err) {
@@ -6244,7 +6311,7 @@ app.delete("/make-server-4e36197a/admin/ads/:id", requireAdminChecked, async (c)
   try {
     const id = c.req.param("id");
     await kv.del(`ovora:ad:${id}`);
-    await CargoAuditLog.record({ action: 'ad.admin_delete', actorEmail: 'admin', targetId: id, targetType: 'ad' });
+    await CargoAuditLog.record({ action: 'ad.admin_delete', actorEmail: adminActor(c), targetId: id, targetType: 'ad' });
     console.log(`[admin/ads] Deleted ad ${id}`);
     return c.json({ success: true });
   } catch (err) {

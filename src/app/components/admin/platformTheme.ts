@@ -9,5 +9,7 @@ export const PLATFORM_THEME: Record<Platform, { label: string; accent: string; g
 export const GROUP_PLATFORM: Record<string, Platform> = {
   CARGO: 'cargo',
   AVIA: 'avia',
+  // «Аудит» собирает журналы обеих площадок — красим как общий раздел.
+  'Аудит': 'shared',
   'Общее': 'shared',
 };

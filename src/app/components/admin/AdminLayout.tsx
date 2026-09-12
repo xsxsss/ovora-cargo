@@ -32,7 +32,18 @@ function clearAdminSession() {
   sessionStorage.removeItem('ovora_admin_role');
 }
 
-const navGroups = [
+type AdminRole = 'super-admin' | 'cargo-admin' | 'avia-admin';
+
+type NavItem = {
+  name: string;
+  href: string;
+  icon: any;
+  exact?: boolean;
+  /** Если задано — пункт виден только этим ролям (пусто = всем ролям группы) */
+  roles?: AdminRole[];
+};
+
+const navGroups: { label: string; items: NavItem[] }[] = [
   {
     label: 'Главная',
     items: [
@@ -54,7 +65,6 @@ const navGroups = [
       { name: 'Аналитика', href: '/admin/cargo/analytics', icon: BarChart3 },
       { name: 'Подписки', href: '/admin/cargo/subscriptions', icon: Crown },
       { name: 'Настройки CARGO', href: '/admin/cargo/settings', icon: SlidersHorizontal },
-      { name: 'Аудит CARGO', href: '/admin/cargo/audit', icon: History },
     ],
   },
   {
@@ -65,7 +75,16 @@ const navGroups = [
       { name: 'AVIA Аналитика', href: '/admin/avia/analytics', icon: BarChart3 },
       { name: 'AVIA Настройки', href: '/admin/avia/settings', icon: SlidersHorizontal },
       { name: 'AVIA Чёрный список', href: '/admin/avia/blacklist', icon: ShieldOff },
-      { name: 'AVIA Аудит', href: '/admin/avia/audit', icon: History },
+    ],
+  },
+  {
+    // Журналы обеих площадок собраны в одну папку — директору видно сразу,
+    // кто и что делал в админке. Сотрудник площадки видит здесь только свой
+    // журнал: доступ к чужому всё равно закрыт на сервере (requireRole).
+    label: 'Аудит',
+    items: [
+      { name: 'Аудит CARGO', href: '/admin/cargo/audit', icon: History, roles: ['super-admin', 'cargo-admin'] },
+      { name: 'Аудит AVIA',  href: '/admin/avia/audit',  icon: History, roles: ['super-admin', 'avia-admin'] },
     ],
   },
   {
@@ -98,7 +117,7 @@ export function AdminLayout() {
     (!!sessionStorage.getItem('ovora_admin_token') || !!sessionStorage.getItem('ovora_admin_jwt'))
   );
   const [idleWarningSecs, setIdleWarningSecs] = useState<number | null>(null);
-  const adminRole = (sessionStorage.getItem('ovora_admin_role') || 'super-admin') as 'super-admin' | 'cargo-admin' | 'avia-admin';
+  const adminRole = (sessionStorage.getItem('ovora_admin_role') || 'super-admin') as AdminRole;
   // Три роли — три непересекающихся набора разделов:
   //   super-admin (директор) — всё, включая «Общее» (реклама, чёрный список,
   //     коды доступа, настройки сайта) — это настройки всей платформы;
@@ -106,12 +125,18 @@ export function AdminLayout() {
   //   avia-admin  — только своя площадка.
   // Раньше cargo-admin видел ещё и «Общее», из-за чего сотрудник CARGO мог
   // менять общеплатформенные настройки, а роли были несимметричны.
-  const visibleNavGroups = navGroups.filter(group => {
-    if (adminRole === 'super-admin') return true;
-    if (adminRole === 'cargo-admin') return group.label === 'Главная' || group.label === 'CARGO';
-    if (adminRole === 'avia-admin')  return group.label === 'Главная' || group.label === 'AVIA';
-    return true;
-  });
+  // «Аудит» — общая папка: её видят все роли, но внутри остаются только те
+  // журналы, которые роли положены (фильтр по item.roles ниже).
+  const visibleNavGroups = navGroups
+    .filter(group => {
+      if (adminRole === 'super-admin') return true;
+      if (group.label === 'Главная' || group.label === 'Аудит') return true;
+      if (adminRole === 'cargo-admin') return group.label === 'CARGO';
+      if (adminRole === 'avia-admin')  return group.label === 'AVIA';
+      return true;
+    })
+    .map(group => ({ ...group, items: group.items.filter(i => !i.roles || i.roles.includes(adminRole)) }))
+    .filter(group => group.items.length > 0);
 
   usePolling(async () => {
     const s = await getAdminStats();

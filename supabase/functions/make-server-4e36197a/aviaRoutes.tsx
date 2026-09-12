@@ -52,6 +52,16 @@ export function setupAviaRoutes(app: Hono, deps: AviaDeps): void {
 
   const P = '/make-server-4e36197a/avia'; // prefix
 
+  // Кто именно выполнил админ-действие — роль из проверенного токена.
+  // Раньше в журнал писалось просто «admin», и нельзя было понять, директор
+  // это был или сотрудник AVIA. Роль ставит requireAdmin (c.set('adminRole', …)).
+  // Побочный эффект: помечаем запрос как «залогирован подробно», чтобы сквозной
+  // журнал админки (auditFallback в index.ts) не продублировал его admin.request.
+  const adminActor = (c: any): string => {
+    c.set('auditLogged', true);
+    return `admin:${c.get('adminRole') || 'unknown'}`;
+  };
+
   // ── Rate limit middleware factory (shorthand) ──────────────────────────────
   const rlPhone = (preset: { max: number; windowMs: number }) =>
     rateLimitMiddleware(preset, (c) => {
@@ -1919,7 +1929,7 @@ export function setupAviaRoutes(app: Hono, deps: AviaDeps): void {
       if ('passportVerified' in updates || 'passportExpired' in updates) {
         await AuditLog.record({
           action: 'user.passport_verification_status_changed',
-          actorPhone: 'admin', targetId: phone, targetType: 'user',
+          actorPhone: adminActor(c), targetId: phone, targetType: 'user',
           details: {
             passportVerified: updates.passportVerified,
             passportExpired : updates.passportExpired,
@@ -1930,7 +1940,7 @@ export function setupAviaRoutes(app: Hono, deps: AviaDeps): void {
       }
       const otherFields = Object.keys(updates).filter(f => f !== 'passportVerified' && f !== 'passportExpired');
       if (otherFields.length > 0) {
-        await AuditLog.record({ action: 'user.admin_edit', actorPhone: 'admin', targetId: phone, targetType: 'user', details: { fields: otherFields } });
+        await AuditLog.record({ action: 'user.admin_edit', actorPhone: adminActor(c), targetId: phone, targetType: 'user', details: { fields: otherFields } });
       }
       return c.json({ success: true, user: updated });
     } catch (err) {
@@ -1952,7 +1962,7 @@ export function setupAviaRoutes(app: Hono, deps: AviaDeps): void {
       const updated = await Users.update(phone, updates);
       await AuditLog.record({
         action: blocked ? 'user.admin_block' : 'user.admin_unblock',
-        actorPhone: 'admin', targetId: phone, targetType: 'user',
+        actorPhone: adminActor(c), targetId: phone, targetType: 'user',
         details: blocked ? { reason: reason || '' } : undefined,
       });
       return c.json({ success: true, user: updated });
@@ -1977,7 +1987,7 @@ export function setupAviaRoutes(app: Hono, deps: AviaDeps): void {
         originalRole: existing.role,
         originalName: `${existing.firstName || ''} ${existing.lastName || ''}`.trim(),
       });
-      await AuditLog.record({ action: 'user.admin_delete', actorPhone: 'admin', targetId: phone, targetType: 'user', details: { snapshot: existing } });
+      await AuditLog.record({ action: 'user.admin_delete', actorPhone: adminActor(c), targetId: phone, targetType: 'user', details: { snapshot: existing } });
       return c.json({ success: true, blacklisted: true });
     } catch (err) {
       console.log('Error DELETE /avia/admin/users/:phone:', err);
@@ -1996,7 +2006,7 @@ export function setupAviaRoutes(app: Hono, deps: AviaDeps): void {
       const pinHash = await bcrypt.hash(newPin, salt);
       await Pins.set(phone, { pinHash, phone, attempts: 0, createdAt: new Date().toISOString() });
 
-      await AuditLog.record({ action: 'user.admin_reset_code', actorPhone: 'admin', targetId: phone, targetType: 'user' });
+      await AuditLog.record({ action: 'user.admin_reset_code', actorPhone: adminActor(c), targetId: phone, targetType: 'user' });
       return c.json({ success: true, newPin });
     } catch (err) {
       console.log('Error POST /avia/admin/users/:phone/reset-code:', err);
@@ -2031,7 +2041,7 @@ export function setupAviaRoutes(app: Hono, deps: AviaDeps): void {
         passportExpired    : false,
       });
 
-      await AuditLog.record({ action: 'user.admin_reset_passport', actorPhone: 'admin', targetId: phone, targetType: 'user' });
+      await AuditLog.record({ action: 'user.admin_reset_passport', actorPhone: adminActor(c), targetId: phone, targetType: 'user' });
       console.log(`[AVIA] Паспорт сброшен админом для ${phone}`);
       return c.json({ success: true, user: updated });
     } catch (err) {
@@ -2086,7 +2096,7 @@ export function setupAviaRoutes(app: Hono, deps: AviaDeps): void {
         ...(moderationReason ? { moderationReason, moderationBy: 'admin', moderationAt: now } : {}),
       };
       await Flights.set(id, updated);
-      await AuditLog.record({ action: 'flight.admin_status_change', actorPhone: 'admin', targetId: id, targetType: 'flight', details: { status, previousStatus, moderationReason } });
+      await AuditLog.record({ action: 'flight.admin_status_change', actorPhone: adminActor(c), targetId: id, targetType: 'flight', details: { status, previousStatus, moderationReason } });
       return c.json({ success: true, flight: updated });
     } catch (err) {
       console.log('Error PUT /avia/admin/flights/:id/status:', err);
@@ -2100,7 +2110,7 @@ export function setupAviaRoutes(app: Hono, deps: AviaDeps): void {
       const deal = await Deals.get(id);
       if (!deal) return c.json({ error: 'Deal not found' }, 404);
       await Deals.set(id, { ...deal, deletedAt: new Date().toISOString() });
-      await AuditLog.record({ action: 'deal.admin_delete', actorPhone: 'admin', targetId: id, targetType: 'deal' });
+      await AuditLog.record({ action: 'deal.admin_delete', actorPhone: adminActor(c), targetId: id, targetType: 'deal' });
       return c.json({ success: true });
     } catch (err) {
       console.log('Error DELETE /avia/admin/deals/:id:', err);
@@ -2150,7 +2160,7 @@ export function setupAviaRoutes(app: Hono, deps: AviaDeps): void {
         return c.json({ error: 'Эта запись относится к CARGO — снять блокировку может только cargo-admin' }, 403);
       }
       await Blacklist.remove(phone);
-      await AuditLog.record({ action: 'blacklist.admin_remove', actorPhone: 'admin', targetId: phone, targetType: 'blacklist' });
+      await AuditLog.record({ action: 'blacklist.admin_remove', actorPhone: adminActor(c), targetId: phone, targetType: 'blacklist' });
       return c.json({ success: true });
     } catch (err) {
       console.log('Error DELETE /avia/admin/blacklist/:phone:', err);
@@ -2178,7 +2188,7 @@ export function setupAviaRoutes(app: Hono, deps: AviaDeps): void {
     try {
       const body = await c.req.json();
       await kv.set('ovora:avia-admin:settings', { ...body, updatedAt: new Date().toISOString() });
-      await AuditLog.record({ action: 'settings.admin_update', actorPhone: 'admin', targetType: 'settings', details: { fields: Object.keys(body) } });
+      await AuditLog.record({ action: 'settings.admin_update', actorPhone: adminActor(c), targetType: 'settings', details: { fields: Object.keys(body) } });
       return c.json({ success: true });
     } catch (err) {
       console.log('Error PUT /avia/admin/settings:', err);

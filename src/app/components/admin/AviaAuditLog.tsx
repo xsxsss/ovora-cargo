@@ -4,6 +4,7 @@ import { toast } from 'sonner';
 import { getAviaAdminAudit } from '../../api/aviaAdminApi';
 import { AdminPageHeader, HeaderBtn, SkeletonList } from './AdminPageHeader';
 import { exportCsv } from '../../utils/adminCsvExport';
+import { ActorBadge, actorInfo } from './auditActor';
 
 const ACTION_LABELS: Record<string, string> = {
   'user.register': '👤 Регистрация', 'user.login': '🔑 Вход', 'user.profile_update': '✏ Обновление профиля',
@@ -16,6 +17,13 @@ const ACTION_LABELS: Record<string, string> = {
   'deal.cancel': '🚫 Отменена сделка', 'deal.complete': '⭐ Завершена сделка', 'deal.pod_upload': '📷 Фото доставки',
   'deal.delete': '🗑 Удаление сделки', 'deal.admin_delete': '🗑 Удаление сделки админом',
   'chat.delete': '💬 Удаление чата',
+  'user.passport_verification_status_changed': '🛂 Статус проверки паспорта',
+  'user.admin_reset_passport': '♻ Сброс паспорта админом',
+  'flight.admin_status_change': '🔁 Смена статуса рейса админом',
+  'blacklist.admin_remove': '✅ Снятие из чёрного списка',
+  'settings.admin_update': '⚙ Изменение настроек',
+  'admin.login': '🔑 Вход в админку',
+  'admin.request': '📝 Действие в админке',
 };
 
 const PAGE_SIZE = 50;
@@ -59,7 +67,7 @@ export function AviaAuditLog() {
     <div className="space-y-5">
       <AdminPageHeader
         title="AVIA — Журнал аудита"
-        subtitle="Полный лог действий курьеров и отправителей"
+        subtitle="Кто и что делал в AVIA: вход в админку, рейсы, сделки, паспорта, настройки"
         icon={History}
         gradient="linear-gradient(135deg,#64748b,#94a3b8)"
         accent="#64748b"
@@ -70,7 +78,7 @@ export function AviaAuditLog() {
               icon={Download}
               variant="ghost"
               onClick={() => exportCsv(
-                entries.map(e => ({ timestamp: e.timestamp, action: e.action, actorPhone: e.actorPhone, targetId: e.targetId || '', targetType: e.targetType || '', details: JSON.stringify(e.details || {}) })),
+                entries.map(e => ({ timestamp: e.timestamp, action: ACTION_LABELS[e.action] || e.action, actor: actorInfo(e.actorPhone).label, actorRaw: e.actorPhone, targetId: e.targetId || '', targetType: e.targetType || '', details: JSON.stringify(e.details || {}) })),
                 `avia_audit_export_${new Date().toISOString().slice(0, 10)}.csv`
               )}
             >
@@ -86,7 +94,7 @@ export function AviaAuditLog() {
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
           <input
             type="text"
-            placeholder="Телефон актора..."
+            placeholder="Актор: телефон или admin:super-admin..."
             value={actorPhone}
             onChange={e => setActorPhone(e.target.value)}
             className="w-full pl-9 pr-4 py-2.5 rounded-xl text-sm text-gray-700 outline-none transition-all"
@@ -132,7 +140,7 @@ export function AviaAuditLog() {
                     </span>
                   </div>
                   <p className="text-xs text-gray-400 break-words">
-                    {entry.actorPhone}
+                    <ActorBadge actor={entry.actorPhone} />
                     {entry.targetId && entry.targetId !== entry.actorPhone ? ` → ${entry.targetId}` : ''}
                     {entry.details && Object.keys(entry.details).length > 0 ? ` · ${JSON.stringify(entry.details)}` : ''}
                   </p>

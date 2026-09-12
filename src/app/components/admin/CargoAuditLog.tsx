@@ -5,6 +5,7 @@ import { getAdminAudit } from '../../api/dataApi';
 import { AdminPageHeader, HeaderBtn, SkeletonList } from './AdminPageHeader';
 import { PLATFORM_THEME } from './platformTheme';
 import { exportCsv } from '../../utils/adminCsvExport';
+import { ActorBadge, actorInfo } from './auditActor';
 
 const ACTION_LABELS: Record<string, string> = {
   'cargo.admin_delete': '🗑 Удаление груза',
@@ -19,6 +20,21 @@ const ACTION_LABELS: Record<string, string> = {
   'ad.admin_create': '➕ Создание рекламы',
   'ad.admin_update': '✏ Изменение рекламы',
   'ad.admin_delete': '🗑 Удаление рекламы',
+  'cargo.admin_edit': '✏ Правка груза',
+  'document.admin_reset': '♻ Сброс документа',
+  'admin.login': '🔑 Вход в админку',
+  'admin.request': '📝 Действие в админке',
+  // Действия обычных пользователей — они тоже пишутся в этот журнал.
+  'trip.create': '🚚 Создана поездка',
+  'trip.edit': '✏ Правка поездки',
+  'trip.delete': '🗑 Удаление поездки',
+  'cargo.create': '📦 Создан груз',
+  'cargo.edit': '✏ Правка груза (владелец)',
+  'cargo.delete': '🗑 Удаление груза (владелец)',
+  'offer.create': '🤝 Создана оферта',
+  'review.create': '⭐ Оставлен отзыв',
+  'tracking.status_change': '🔁 Смена статуса доставки',
+  'tracking.pod_upload': '📷 Фото доставки',
 };
 
 const PAGE_SIZE = 50;
@@ -63,7 +79,7 @@ export function CargoAuditLog() {
     <div className="space-y-5">
       <AdminPageHeader
         title="CARGO — Журнал аудита"
-        subtitle="Полный лог админских действий: грузы, оферты, отзывы, документы, пользователи"
+        subtitle="Кто и что делал в CARGO: вход в админку, правки, удаления, проверка документов"
         icon={History}
         gradient={theme.gradient}
         accent={theme.accent}
@@ -74,7 +90,7 @@ export function CargoAuditLog() {
               icon={Download}
               variant="ghost"
               onClick={() => exportCsv(
-                entries.map(e => ({ timestamp: e.timestamp, action: e.action, actorEmail: e.actorEmail, targetId: e.targetId || '', targetType: e.targetType || '', details: JSON.stringify(e.details || {}) })),
+                entries.map(e => ({ timestamp: e.timestamp, action: ACTION_LABELS[e.action] || e.action, actor: actorInfo(e.actorEmail).label, actorRaw: e.actorEmail, targetId: e.targetId || '', targetType: e.targetType || '', details: JSON.stringify(e.details || {}) })),
                 `cargo_audit_export_${new Date().toISOString().slice(0, 10)}.csv`
               )}
             >
@@ -90,7 +106,7 @@ export function CargoAuditLog() {
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
           <input
             type="text"
-            placeholder="Email актора..."
+            placeholder="Актор: email или admin:super-admin..."
             value={actorEmail}
             onChange={e => setActorEmail(e.target.value)}
             className="w-full pl-9 pr-4 py-2.5 rounded-xl text-sm text-gray-700 outline-none transition-all"
@@ -136,7 +152,7 @@ export function CargoAuditLog() {
                     </span>
                   </div>
                   <p className="text-xs text-gray-400 break-words">
-                    {entry.actorEmail}
+                    <ActorBadge actor={entry.actorEmail} />
                     {entry.targetId && entry.targetId !== entry.actorEmail ? ` → ${entry.targetId}` : ''}
                     {entry.details && Object.keys(entry.details).length > 0 ? ` · ${JSON.stringify(entry.details)}` : ''}
                   </p>
