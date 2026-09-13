@@ -1277,16 +1277,45 @@ app.put("/make-server-4e36197a/trips/:id", async (c) => {
       }
     }
 
+    // ✅ FIX LOG-1: белый список обновляемых полей + валидация переходов статуса
+    const ALLOWED_UPDATE_FIELDS = [
+      'status', 'completedAt', 'prevStatus',
+      'from', 'to', 'date',
+      'availableSeats', 'childSeats', 'cargoCapacity',
+      'pricePerSeat', 'pricePerKg',
+      'notes', 'vehicle', 'fromLat', 'fromLng', 'toLat', 'toLng',
+    ] as const;
+
+    const VALID_STATUS_TRANSITIONS: Record<string, string[]> = {
+      active:      ['inProgress', 'frozen', 'cancelled'],
+      inProgress:  ['completed', 'frozen', 'cancelled'],
+      frozen:      ['active', 'inProgress', 'cancelled'],
+      completed:   [],
+      cancelled:   [],
+    };
+
+    // Проверяем запрос на статус
+    if (body.status && body.status !== existing.status) {
+      const allowed = VALID_STATUS_TRANSITIONS[existing.status];
+      if (!allowed || !allowed.includes(body.status)) {
+        return c.json({ error: `Недопустимый переход: ${existing.status} → ${body.status}` }, 400);
+      }
+    }
+
     // 🗺️ Очищаем адреса если они обновляются
     // ✅ Удаляем callerEmail из данных — служебное поле, не должно храниться в KV
-    const { callerEmail: _ignored, ...cleanedBody } = body as any;
-    if (body.from) {
-      cleanedBody.from = cleanAddress(body.from);
+    const { callerEmail: _ignored, ...rawBody } = body as any;
+    const cleanedBody: Record<string, unknown> = {};
+    for (const key of ALLOWED_UPDATE_FIELDS) {
+      if (key in rawBody) cleanedBody[key] = rawBody[key];
     }
-    if (body.to) {
-      cleanedBody.to = cleanAddress(body.to);
+    if (cleanedBody.from) {
+      cleanedBody.from = cleanAddress(String(cleanedBody.from));
     }
-    
+    if (cleanedBody.to) {
+      cleanedBody.to = cleanAddress(String(cleanedBody.to));
+    }
+
     const updated = { ...existing, ...cleanedBody, id, updatedAt: new Date().toISOString() };
     
     console.log(`[PUT /trips/${id}] Updating trip:`, {
