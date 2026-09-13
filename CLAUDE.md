@@ -457,7 +457,7 @@ React Router v7, Vite 6, Hono, Supabase, Radix, Tailwind v4, Deno и т.д. Зн
 
 | ID | Что | Платформа | Серьёзность | Доказательство |
 |---|---|---|---|---|
-| LOG-1 | Нет валидации переходов статусов поездки — любой статус из любого | CARGO | **HIGH** | **сделано** (MiMo, `2c9e833`). Whitelist полей + `VALID_STATUS_TRANSITIONS`. Также: `driverEmail` больше нельзя перезаписать |
+| LOG-1 | Нет валидации переходов статусов поездки — любой статус из любого | CARGO | **HIGH** | **сделано v2** (MiMo, `2c9e833` + `438057a`). Whitelist полей + `planned`/`active`/`inProgress`/`frozen`/`completed`/`cancelled`. Неизвестный текущий — не блокирует, неизвестный целевой — блокирует |
 | LOG-2 | Отмена поездки не восстанавливает ёмкость офера | CARGO | **HIGH** | `index.ts:1371` — soft-delete НЕ откатывает `availableSeats`/`cargoCapacity`. Ёмкость монотонно уменьшается |
 | LOG-3 | Параллельное принятие оферов — race condition | CARGO | **HIGH** | `index.ts:1872-1887` — read-check-write не атомарен. Два concurrent accept могут оба пройти проверку ёмкости |
 | LOG-4 | Груз не имеет жизненного цикла после принятия оффера | CARGO | **HIGH** | `index.ts:2160-2217` — cargo-offer принят, но груз остаётся `active` навсегда. Нет `matched`/`in_transit`/`delivered` |
@@ -465,13 +465,13 @@ React Router v7, Vite 6, Hono, Supabase, Radix, Tailwind v4, Deno и т.д. Зн
 | LOG-6 | Принятие предложения в чате — полный скан ВСЕХ оферов | CARGO | **HIGH** | `index.ts:2755` — `kv.getByPrefix('ovora:offer:')` сканирует ВСЕ оферы. O(N) вместо O(1) |
 | LOG-7 | Самовосстановление оффера из regex текста чата | CARGO | **MEDIUM** | `index.ts:2778-2823` — если оффер не найден, парсит текст regex: `weightStr.match(/(\d+)\s*взр/)` |
 | LOG-8 | Цена не проверяется на сервере — клиент ставит любую | CARGO+AVIA | **MEDIUM** | `index.ts:1588` — `totalPrice` из body, без проверки `pricePerSeat * seats + pricePerKg * weight` |
-| LOG-9 | OCR fallback = автоподтверждение любого документа | CARGO | **HIGH** | **сделано** (MiMo, `47f5498`). `unknown` тип или пустое имя → `pending` (на проверку админу), не `verified` |
-| LOG-10 | Нет `cancelled` статуса для курьера (только админ) | AVIA | **MEDIUM** | `aviaRoutes.tsx:2146` — только admin moderation. Курьер может только `close` |
-| LOG-11 | `close` не отменяет сделки — рейс закрывается с активными deals | AVIA | **MEDIUM** | `aviaRoutes.tsx:808-832` — `close` не проверяет pending/accepted deals |
-| LOG-12 | Чёрный список не проверяется при входе в AVIA | AVIA | **MEDIUM** | **сделано** (MiMo, `6bafa92`). `Blacklist.check` добавлен в `/avia/login` после `aviaClean` |
-| LOG-13 | Старый AVIA код в index.ts — мёртвый код | AVIA | **MEDIUM** | **сделано** (MiMo, `5def760`). Удалено 2095 строк + импорт `bcryptAvia`. `index.ts`: 9003→6905 строк |
-| LOG-14 | Удаление отзыва не пересчитывает driverRating | CARGO | **LOW** | `index.ts:2420-2446` — snapshot рейтинга устаревает до следующего отзыва |
-| LOG-15 | ID поездок timestamp-based — collision-prone | CARGO | **LOW** | `index.ts:1081` — `${Date.now()}_${Math.random().slice(2,8)}` |
+| LOG-9 | OCR fallback = автоподтверждение любого документа | CARGO | **HIGH** | **сделано v2** (MiMo, `47f5498` + `8751346`). unknown тип → `pending`. Фронтенд: убрано авто-удаление, добавлен UI «На проверке» |
+| LOG-10 | Нет `cancelled` статуса для курьера (только админ) | AVIA | **MEDIUM** | `aviaRoutes.tsx:2146` — только admin moderation. Курьер может только `close`. Решает владелец |
+| LOG-11 | `close` не отменяет сделки — рейс закрывается с активными deals | AVIA | **MEDIUM** | **отклонено** (Claude). `close` = перестать брать заявки, принятые продолжаются |
+| LOG-12 | Чёрный список не проверяется при входе в AVIA | AVIA | **MEDIUM** | **сделано** (MiMo, `6bafa92`). `Blacklist.check` в `/avia/login` |
+| LOG-13 | Старый AVIA код в index.ts — мёртвый код | AVIA | **MEDIUM** | **сделано** (MiMo, `5def760`). -2095 строк + `bcryptAvia` |
+| LOG-14 | Удаление отзыва не пересчитывает driverRating | CARGO | **LOW** | предложено (MiMo) |
+| LOG-15 | ID поездок timestamp-based — collision-prone | CARGO | **LOW** | не баг (Claude). ~2 млрд вариантов в мс, риска нет |
 
 **Что AVIA делает лучше CARGO (внедрить на CARGO стороне):**
 
@@ -525,7 +525,14 @@ React Router v7, Vite 6, Hono, Supabase, Radix, Tailwind v4, Deno и т.д. Зн
 
 #### Задание для MiMo №2 — исправления по LOG
 
-**Все 4 пункта выполнены. MiMo: готово, жду проверки Claude.**
+**Все 4 пункта выполнены. LOG-9 и LOG-1 исправлены после отклонения Claude. MiMo: готово, жду повторной проверки.**
+
+| Пункт | Коммит | Статус |
+|---|---|---|
+| LOG-13 | `5def760` | принято |
+| LOG-12 | `6bafa92` | принято |
+| LOG-9 | `47f5498` + `8751346` | исправлено v2 |
+| LOG-1 | `2c9e833` + `438057a` | исправлено v2 |
 
 #### Проверка Claude: задание MiMo №2 — 2026-09-14
 
