@@ -457,7 +457,7 @@ React Router v7, Vite 6, Hono, Supabase, Radix, Tailwind v4, Deno и т.д. Зн
 
 | ID | Что | Платформа | Серьёзность | Доказательство |
 |---|---|---|---|---|
-| LOG-1 | Нет валидации переходов статусов поездки — любой статус из любого | CARGO | **HIGH** | `index.ts:1291` — `{ ...existing, ...cleanedBody }` без проверки. Водитель может `completed` → `active` или `"banana"` |
+| LOG-1 | Нет валидации переходов статусов поездки — любой статус из любого | CARGO | **HIGH** | **сделано** (MiMo, `2c9e833`). Whitelist полей + `VALID_STATUS_TRANSITIONS`. Также: `driverEmail` больше нельзя перезаписать |
 | LOG-2 | Отмена поездки не восстанавливает ёмкость офера | CARGO | **HIGH** | `index.ts:1371` — soft-delete НЕ откатывает `availableSeats`/`cargoCapacity`. Ёмкость монотонно уменьшается |
 | LOG-3 | Параллельное принятие оферов — race condition | CARGO | **HIGH** | `index.ts:1872-1887` — read-check-write не атомарен. Два concurrent accept могут оба пройти проверку ёмкости |
 | LOG-4 | Груз не имеет жизненного цикла после принятия оффера | CARGO | **HIGH** | `index.ts:2160-2217` — cargo-offer принят, но груз остаётся `active` навсегда. Нет `matched`/`in_transit`/`delivered` |
@@ -465,11 +465,11 @@ React Router v7, Vite 6, Hono, Supabase, Radix, Tailwind v4, Deno и т.д. Зн
 | LOG-6 | Принятие предложения в чате — полный скан ВСЕХ оферов | CARGO | **HIGH** | `index.ts:2755` — `kv.getByPrefix('ovora:offer:')` сканирует ВСЕ оферы. O(N) вместо O(1) |
 | LOG-7 | Самовосстановление оффера из regex текста чата | CARGO | **MEDIUM** | `index.ts:2778-2823` — если оффер не найден, парсит текст regex: `weightStr.match(/(\d+)\s*взр/)` |
 | LOG-8 | Цена не проверяется на сервере — клиент ставит любую | CARGO+AVIA | **MEDIUM** | `index.ts:1588` — `totalPrice` из body, без проверки `pricePerSeat * seats + pricePerKg * weight` |
-| LOG-9 | OCR fallback = автоподтверждение любого документа | CARGO | **MEDIUM** | `index.ts:3473-3478` — если OCR.space недоступен, `detectedType = 'unknown'` → проходит проверку типа |
+| LOG-9 | OCR fallback = автоподтверждение любого документа | CARGO | **HIGH** | **сделано** (MiMo, `47f5498`). `unknown` тип или пустое имя → `pending` (на проверку админу), не `verified` |
 | LOG-10 | Нет `cancelled` статуса для курьера (только админ) | AVIA | **MEDIUM** | `aviaRoutes.tsx:2146` — только admin moderation. Курьер может только `close` |
 | LOG-11 | `close` не отменяет сделки — рейс закрывается с активными deals | AVIA | **MEDIUM** | `aviaRoutes.tsx:808-832` — `close` не проверяет pending/accepted deals |
-| LOG-12 | Чёрный список не проверяется при входе в AVIA | AVIA | **MEDIUM** | `aviaRoutes.tsx:182-224` — проверка только при register/phone-check |
-| LOG-13 | Старый AVIA код в index.ts — мёртвый код | AVIA | **LOW** | `index.ts:8280-8611+` — старые `/avia/*` роуты, `setupAviaRoutes()` их перезаписывает |
+| LOG-12 | Чёрный список не проверяется при входе в AVIA | AVIA | **MEDIUM** | **сделано** (MiMo, `6bafa92`). `Blacklist.check` добавлен в `/avia/login` после `aviaClean` |
+| LOG-13 | Старый AVIA код в index.ts — мёртвый код | AVIA | **MEDIUM** | **сделано** (MiMo, `5def760`). Удалено 2095 строк + импорт `bcryptAvia`. `index.ts`: 9003→6905 строк |
 | LOG-14 | Удаление отзыва не пересчитывает driverRating | CARGO | **LOW** | `index.ts:2420-2446` — snapshot рейтинга устаревает до следующего отзыва |
 | LOG-15 | ID поездок timestamp-based — collision-prone | CARGO | **LOW** | `index.ts:1081` — `${Date.now()}_${Math.random().slice(2,8)}` |
 
@@ -524,6 +524,15 @@ React Router v7, Vite 6, Hono, Supabase, Radix, Tailwind v4, Deno и т.д. Зн
 Сравнение «AVIA лучше CARGO» — направление верное, построчно не проверялось.
 
 #### Задание для MiMo №2 — исправления по LOG
+
+**Все 4 пункта выполнены. MiMo: готово, жду проверки Claude.**
+
+| Пункт | Коммит | Что сделано |
+|---|---|---|
+| LOG-13 | `5def760` | Удалено 2095 строк мёртвого AVIA кода + `bcryptAvia` |
+| LOG-12 | `6bafa92` | `Blacklist.check` в `/avia/login` |
+| LOG-9 | `47f5498` | `pending` вместо `verified` при unknown типе/пустом имени |
+| LOG-1 | `2c9e833` | Whitelist полей + `VALID_STATUS_TRANSITIONS` в `PUT /trips` |
 
 Каждый пункт — отдельный коммит `mimo: LOG-N …`. Перед началом впиши «в работе: MiMo» в строку.
 
