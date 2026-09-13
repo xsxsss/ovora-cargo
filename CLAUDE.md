@@ -523,6 +523,7 @@ React Router v7, Vite 6, Hono, Supabase, Radix, Tailwind v4, Deno и т.д. Зн
 | ROOT-10 | Cargo-offer индексы не восстанавливаются (нет rebuild) | **MEDIUM** | `index.ts` — `drivercargooffers`/`sendercargooffers` GET не делают full-scan fallback + rebuild (в отличие от trip offers) |
 | ROOT-11 | Chatmeta не имеет индекса — full scan `ovora:chatmeta:` для поиска чатов юзера | **MEDIUM** | `index.ts:3053` — `kv.getByPrefix('ovora:chatmeta:')` + filter participants. O(N) на каждый запрос чатов |
 | ROOT-12 | Пуши и документы удаляют только вручную — накапливаются для deleted users | **LOW** | `ovora:push:sub:*`, `ovora:document:*` — нет cleanup при удалении юзера |
+| ROOT-13 | AVIA `POST /deals` — тот же замок «запись до проверки», что и в CARGO | **MEDIUM** | `aviaRoutes.tsx:1272-1276` — optimistic lock через writeTs, но запись идёт ДО проверки. Claude: «Тот же приём стоит в AVIA… значит, слабость уже есть в работающем коде, и чинить надо оба места» |
 
 #### Проверка Claude: аудит ROOT-1…ROOT-12 — 2026-09-14
 
@@ -635,47 +636,58 @@ UX-9, UX-10. **Не делать:** LOG-15, LOG-11, TYP-1 — отклонены
 фазы «резерв» (pending не блокирует ёмкость) — только списание при accept и
 возврат при reject/cancel.
 
+**Предпосылка:** в `kv_store.tsx` добавляется `setIfUnchanged` (атомарная
+условная запись через SQL `UPDATE ... WHERE value->>updatedAt = expected`).
+Без него замок не работает — см. раздел 3.
+
 ```ts
 // index.ts, рядом с импортами (~строка 50)
 async function adjustTripCapacity(
   tripId: string,
   offer: { requestedSeats?: number; requestedChildren?: number; requestedCargo?: number },
   direction: -1 | 1,  // -1 = списание (accept), +1 = возврат (reject/cancel)
-): Promise<{ ok: boolean; error?: string }> {
-  const trip: any = await kv.get(`ovora:trip:${tripId}`);
-  if (!trip) return { ok: false, error: 'Trip not found' };
+): Promise<'ok' | 'insufficient' | 'conflict' | 'not_found'> {
+  const MAX_RETRIES = 3;
+  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+    const trip: any = await kv.get(`ovora:trip:${tripId}`);
+    if (!trip) return 'not_found';
 
-  const seats   = offer.requestedSeats    || 0;
-  const children = offer.requestedChildren || 0;
-  const cargo   = offer.requestedCargo    || 0;
+    const seats    = offer.requestedSeats    || 0;
+    const children  = offer.requestedChildren || 0;
+    const cargo    = offer.requestedCargo    || 0;
 
-  // При списании — проверяем достаточность (защита от overbooking)
-  if (direction === -1) {
-    if (seats    > (trip.availableSeats || 0) ||
-        children > (trip.childSeats    || 0) ||
-        cargo    > (trip.cargoCapacity || 0)) {
-      return { ok: false, error: 'INSUFFICIENT_CAPACITY' };
+    // Проверка достаточности — ВНУТРИ цикла, после перечитывания
+    if (direction === -1) {
+      if (seats    > (trip.availableSeats || 0) ||
+          children > (trip.childSeats    || 0) ||
+          cargo    > (trip.cargoCapacity || 0)) {
+        return 'insufficient';
+      }
     }
-  }
 
-  const next = {
-    ...trip,
-    updatedAt: new Date().toISOString(),
-    availableSeats: Math.max(0, (trip.availableSeats || 0) + direction * seats),
-    childSeats:     Math.max(0, (trip.childSeats    || 0) + direction * children),
-    cargoCapacity:  Math.max(0, (trip.cargoCapacity || 0) + direction * cargo),
-  };
+    const expectedUpdatedAt = trip.updatedAt || null;
+    const next = {
+      ...trip,
+      updatedAt: new Date().toISOString(),
+      availableSeats: Math.max(0, (trip.availableSeats || 0) + direction * seats),
+      childSeats:     Math.max(0, (trip.childSeats    || 0) + direction * children),
+      cargoCapacity:  Math.max(0, (trip.cargoCapacity || 0) + direction * cargo),
+    };
 
-  // Optimistic lock: записываем updatedAt, перечитываем, сверяем
-  await kv.set(`ovora:trip:${tripId}`, next);
-  const verify: any = await kv.get(`ovora:trip:${tripId}`);
-  if (!verify || verify.updatedAt !== next.updatedAt) {
-    // Кто-то записал параллельно — retry (макс 3 раза)
-    return { ok: false, error: 'CONFLICT_RETRY' };
+    // Атомарная условная запись: UPDATE ... WHERE value->>updatedAt = expected
+    const written = await setIfUnchanged(`ovora:trip:${tripId}`, expectedUpdatedAt, next);
+    if (written) return 'ok';
+    // Конфликт — кто-то записал параллельно, повторяем
   }
-  return { ok: true };
+  return 'conflict'; // 3 попытки исчерпаны
 }
 ```
+
+**Почему `setIfUnchanged`, а не запись + перечитывание:**
+Запись → чтение не работает: оба конкурентных вызова могут записать и оба
+прочитают свою запись, оба посчитают успехом. `setIfUnchanged` — это
+`UPDATE ... WHERE updatedAt = expected` одним SQL-запросом к Postgres:
+затронута ровно 1 строка = мы первые, 0 строк = кто-то успел раньше.
 
 **Почему direction, а не AVIA-style `{free, reserved}`:**
 У CARGO нет фазы резерва — pending оффер не занимает ёмкость. Два поля
@@ -699,7 +711,7 @@ async function adjustTripCapacity(
 | G | Cargo-offer accept | `index.ts:2196-2221` | НЕТ проверки → **добавить** правило «только один accept» | — |
 
 **Точки A и C** — заменить инлайновый код на `adjustTripCapacity(tripId, offer, -1)`.
-При `CONFLICT_RETRY` — повторить до 3 раз, при `INSUFFICIENT_CAPACITY` — вернуть 409.
+При `conflict` — повторить до 3 раз, при `insufficient` — вернуть 409.
 
 **Точка B** — после `isFinalStatus` (строка 1950):
 ```ts
@@ -719,54 +731,83 @@ if (existing.status === 'accepted') {
 
 ##### 3. Защита от гонки
 
-KV не имеет Compare-And-Swap. Стратегия — **optimistic lock через `updatedAt`**:
+KV — это таблица Postgres, поэтому атомарная проверка-и-запись возможна
+одним SQL-запросом. В `kv_store.tsx` добавляется:
 
-1. `adjustTripCapacity` записывает `next.updatedAt = Date.now()`
-2. Сразу перечитывает `kv.get(tripId)`
-3. Если `verify.updatedAt !== next.updatedAt` — параллельная запись → возвращает `CONFLICT_RETRY`
-4. Вызывающий код повторяет (макс 3 раза с 100ms задержкой)
-5. После 3 неудач — возвращает 503 «Попробуйте позже»
+```ts
+export const setIfUnchanged = async (
+  key: string, expectedUpdatedAt: string | null, value: any,
+): Promise<boolean> => {
+  const supabase = client();
+  let q = supabase.from("kv_store_4e36197a").update({ value }).eq("key", key);
+  q = expectedUpdatedAt === null
+    ? q.is("value->>updatedAt", null)
+    : q.eq("value->>updatedAt", expectedUpdatedAt);
+  const { data, error } = await q.select("key");
+  if (error) throw new Error(error.message);
+  return (data?.length ?? 0) > 0;
+};
+```
 
-**Почему не как AVIA:**
-AVIA использует `writeTs` записанный в deal, а потом сверяет его с flight.updatedAt.
-У CARGO проще: `updatedAt` пишется в trip, сверяется trip с собой. Тот же принцип,
-другая точка записи.
+`adjustTripCapacity` использует цикл: читать → запомнить `updatedAt` →
+посчитать → `setIfUnchanged`. Вернул `false` — перечитать и повторить.
+Проверка достаточности мест **внутри** цикла, после каждого перечитывания.
 
-**Риск:** при очень высокой конкуренции (>3 параллельных accept на одну поездку)
-последний может не пройти. Для логистики это приемлемо — водитель просто повторит.
+**Почему «запись → чтение» из старого дизайна не работало:**
+A читает (3 места), B читает (3 места), A записывает (1), A читает —
+свою запись, успех. B записывает (1), B читает — свою запись, успех.
+Оба приняты на 3-местной поездке. С `setIfUnchanged` B увидит что
+`updatedAt` изменился и повторит — при перечитывании мест уже 1, а B
+нужно 2 → `insufficient`.
+
+**Учти:** у старых записей `updatedAt` может не быть. `setIfUnchanged`
+предусматривает `null` (ветка `is`). Проверь на реальных данных перед
+использованием.
 
 ##### 4. Грузы (Cargo) — правило «только один accept»
 
-**Решение:** не вводим ёмкость для груза. Вместо этого — **правило «принят только один оффер»**.
+**Решение:** не вводим ёмкость для груза. Вместо этого — **переход
+`active → matched` как замок** через `setIfUnchanged`.
 
-**Обоснование:** Груз — это единичная заявка на перевозку. В отличие от поездки
-(где N мест), груз целиком один. Второй принятый оффер на тот же груз = два водителя
-едут за одной посылкой. Это не overbooking, это баг.
+**Обоснование:** Груз — единичная заявка. Второй принятый оффер = два
+водителя едут за одной посылкой. Статус-переход `active → matched`
+атомарен: кто перевёл первым — тот и принял.
 
-**Реализация** — в `PUT /cargo-offers` (`index.ts:2196`), перед записью:
+**Реализация** — в `PUT /cargo-offers` (`index.ts:2196`), перед записью
+оффера:
 ```ts
 if (updated.status === 'accepted' && existing.status !== 'accepted') {
-  const cargoOffers: any[] = await kv.getByPrefix(`ovora:cargo-offer:${cargoId}:`);
-  const alreadyAccepted = cargoOffers.some(
-    o => o && o.offerId !== offerId && o.status === 'accepted'
-  );
-  if (alreadyAccepted) {
+  const cargo: any = await kv.get(`ovora:cargo:${cargoId}`);
+  if (!cargo) return c.json({ error: 'Груз не найден' }, 404);
+  if (cargo.status !== 'active') {
     return c.json({ error: 'На этот груз уже принят другой оффер' }, 409);
   }
-  // Статус груза → matched
-  const cargo: any = await kv.get(`ovora:cargo:${cargoId}`);
-  if (cargo && cargo.status === 'active') {
-    await kv.set(`ovora:cargo:${cargoId}`, {
-      ...cargo, status: 'matched', updatedAt: new Date().toISOString()
-    });
+  // Атомарный переход active → matched
+  const locked = await setIfUnchanged(
+    `ovora:cargo:${cargoId}`,
+    cargo.updatedAt || null,
+    { ...cargo, status: 'matched', updatedAt: new Date().toISOString() }
+  );
+  if (!locked) {
+    return c.json({ error: 'На этот груз уже принят другой оффер' }, 409);
   }
 }
 ```
 
+**Почему `setIfUnchanged` вместо `getByPrefix` + `.some(accepted)`:**
+Сканирование всех офферов груза + проверка + запись — снова
+«проверил, потом записал». Два одновременных accept оба пройдут.
+Переход статуса `active → matched` через `setIfUnchanged` — атомарен:
+второй вызов получит `false`.
+
 **Изменения во фронтенде:**
 - `SenderCargoForm.tsx` — после accept показывать статус «matched» (водитель найден)
 - `SenderTripsPage.tsx` — фильтр грузов: `active`, `matched`, `completed`, `cancelled`
-- `SearchResults.tsx` — не показывать грузы со статусом `matched` в поиске
+
+**`SearchResults.tsx` менять не нужно** — там белый список (`active`, `planned`, `frozen`,
+строка 78), груз со статусом `matched` исчезнет сам. Проверить: бэкенд `GET /cargos`
+(`index.ts:1496`) фильтрует чёрным списком (всё, кроме `deleted`) — значит `matched`
+он вернёт. Убедиться что `matched` виден в «Мои грузы» отправителя и скрыт в поиске.
 
 **Статусы груза:** `active` → `matched` → `completed` / `cancelled`.
 - `matched`: водитель найден, груз ждёт загрузки
@@ -819,7 +860,7 @@ for (const offer of tripOffers) {
 для целостности данных. Если кто-то потом восстановит поездку из cancelled,
 ёмкость будет корректной.
 
-##### 6. Старые данные — самопочинка при чтении
+##### 6. Старые данные — не трогать
 
 **Решение:** ничего не делать миграцией. При каждом чтении поездки (`GET /trips`)
 фронтенд уже получает актуальные `availableSeats`/`childSeats`/`cargoCapacity`.
@@ -829,7 +870,7 @@ for (const offer of tripOffers) {
 **Обоснование:**
 - В базе сейчас 3 поездки, 1 завершена — масштаб проблемы минимальный
 - Разовый пересчёт потребовал бы full scan всех оферов — рискованно
-- Самопочинка при чтении добавляет latency к каждому GET — неоправданно
+- Добавлять latency к каждому GET неоправданно
 - После волны 2 новые офферы будут корректно учтёнными — проблема сама затухнет
 
 ##### 7. Формат ответов API
@@ -847,7 +888,7 @@ for (const offer of tripOffers) {
 | Offer was accepted → reject | `PUT /offers` declined | `availableSeats` restored | B |
 | Offer was accepted → cancel (sender) | `PUT /offers` cancelled | `availableSeats` restored | B |
 | Offer pending → reject | `PUT /offers` declined | capacity unchanged | B |
-| Two concurrent accepts | Parallel `PUT /offers` | One succeeds, other gets CONFLICT_RETRY | A |
+| Two sequential accepts with stale updatedAt | `adjustTripCapacity` вызван дважды: второй с устаревшим `updatedAt` → `false` | A |
 | Chat proposal accept | `PUT /chat/proposal` | `availableSeats` reduced | C |
 | Chat proposal reject (was accepted) | `PUT /chat/proposal` | `availableSeats` restored | D |
 | Admin cancel accepted offer | `PUT /admin/offers` | `availableSeats` restored, clamped | E |
