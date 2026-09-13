@@ -1,5 +1,6 @@
 import React from 'react';
 import { AlertTriangle, RefreshCw } from 'lucide-react';
+import { Sentry } from '../config/sentry';
 
 interface Props {
   children: React.ReactNode;
@@ -23,6 +24,8 @@ export class ErrorBoundary extends React.Component<Props, State> {
 
   componentDidCatch(error: Error, info: React.ErrorInfo) {
     console.error('[ErrorBoundary] Caught error:', error, info);
+    const isStaleChunk = /dynamically imported module/i.test(error.message);
+    if (!isStaleChunk) Sentry.captureException(error);
   }
 
   render() {
