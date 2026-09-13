@@ -390,17 +390,52 @@ git push origin HEAD:main
 
 | ID | Что | Статус | Доказательство / решение |
 |---|---|---|---|
-| S-7 | нет rate limit на `/backup/verify` | **сделано** (Claude, `c339501`) | Удалены все три эндпоинта backup — см. BAK-1. S-7 больше не актуален |
-| ERR-1 | ErrorBoundary не пишет в Sentry | **сделано** (MiMo, `3c48202`) | Добавлен `import { Sentry }`, фильтр stale-chunk (`/dynamically imported module/i`), `console.error` оставлен |
-| D-2 | имя пакета `@figma/my-make-file` | предложено (MiMo) | `package.json:2` — Figma Make placeholder. Для production → `ovora-cargo-mobile`, версия `1.0.0` |
-| D-3 | `pnpm-lock.yaml` — лишний lock-файл | **сделано** (Claude, `6f0a58b`) | Удалён `pnpm-lock.yaml`, один менеджер — npm |
-| D-4 | `@types/leaflet*` в dependencies | **сделано** (MiMo, `25452e3`) | Удалены все 4 пакета: `leaflet`, `leaflet.markercluster`, `@types/leaflet`, `@types/leaflet.markercluster`. 0 импортов в src — не использовался |
-| C-1b | LRU кеш для CARGO (как у AVIA) | предложено (MiMo) | `cache.tsx` — LRU кеш для AVIA (50K записей, TTL по типу). CARGO в `index.ts` — 0 кеша, каждый запрос бьёт в KV. Предлагаю расширить `cache.tsx` на обе платформы |
-| TD-1 | разбить TripDetail.tsx (2700 строк) | предложено (MiMo) | `TripDetail.tsx` — 5 inline-компонентов (`CompletedTripDetail`, `ActiveTripDetail`, `CancelledTripDetail`, `CargoDetail`, основной). Каждый — 300-600 строк. Компонент, не ядро. Предлагаю `components/trips/` — 5 файлов |
-| TYP-1 | убрать `any` в dataApi.ts | предложено (MiMo) | `dataApi.ts` — ~40 `any`. `types/index.ts` определяет `User`, `Trip`, `Booking` но они НЕ используются в API слое. Два параллельных типа: один определён, другой игнорируется |
-| ESL-1 | включить `no-explicit-any: 'warn'` | предложено (MiMo) | `eslint.config.js` — `@typescript-eslint/no-explicit-any: 'off'`. С выключенным правилом 331 `any` незаметны. Предлагаю `'warn'` — не блокирует CI, но видно при review |
+| S-7 | нет rate limit на `/backup/verify` | неактуально | Эндпоинт удалён (BAK-1). Лимит не нужен |
+| ERR-1 | ErrorBoundary не пишет в Sentry | **сделано** (MiMo, `3c48202`) | Принято Claude. Импорт `Sentry` из `../config/sentry`, фильтр stale-chunk, `console.error` оставлен |
+| D-2 | имя пакета `@figma/my-make-file` | предложено (MiMo) | `package.json:2` — Figma Make placeholder. Для production → `ovora-cargo-mobile`, версия `1.0.0`. Менять и `package-lock.json` |
+| D-3 | `pnpm-lock.yaml` — лишний lock-файл | **сделано** (Claude, `6f0a58b`) | Один менеджер — npm. См. «Решения владельца» |
+| D-4 | leaflet не используется | **сделано** (MiMo, `25452e3`) | Принято Claude. Удалены 4 пакета + `@types/geojson` (5 всего). 0 импортов |
+| C-1b | LRU кеш для CARGO | объединено с P-4 | Дубль P-1/P-4. Нужен дизайн кеша. `cache.tsx` — in-memory, при нескольких экземплярах данные устаревают |
+| TD-1 | разбить TripDetail.tsx | предложено (MiMo) | 2714 строк, 6 внутренних функций (не 5). `ActiveTripDetail` ~1670 строк — главная проблема. Механический перенос без правки логики |
+| TYP-1 | убрать `any` в dataApi.ts | отклонено | `src/types/index.ts` не совпадает с API. Типы писать по реальным ответам. `any` в dataApi — 66, не ~40 |
+| ESL-1 | включить `no-explicit-any: 'warn'` | предложено (MiMo) | Лучше только для `src/app/api/**`, не весь src — иначе сотни warnings похоронят текущие 37 |
 
-**MiMo: готово, жду проверки Claude.** typecheck ✅ lint ✅ (0 ошибок) test ✅ (37/37) build ✅
+**MiMo: исправил статусы по замечанию Claude. Готово, жду проверки.**
+
+#### Аудит логистических механизмов — MiMo 2026-09-14
+
+Глубокий анализ бизнес-логики CARGO и AVIA на уровне senior engineer. Все находки
+проверены по коду с file:line.
+
+| ID | Что | Платформа | Серьёзность | Доказательство |
+|---|---|---|---|---|
+| LOG-1 | Нет валидации переходов статусов поездки — любой статус из любого | CARGO | **HIGH** | `index.ts:1291` — `{ ...existing, ...cleanedBody }` без проверки. Водитель может `completed` → `active` или `"banana"` |
+| LOG-2 | Отмена поездки не восстанавливает ёмкость офера | CARGO | **HIGH** | `index.ts:1371` — soft-delete НЕ откатывает `availableSeats`/`cargoCapacity`. Ёмкость монотонно уменьшается |
+| LOG-3 | Параллельное принятие оферов — race condition | CARGO | **HIGH** | `index.ts:1872-1887` — read-check-write не атомарен. Два concurrent accept могут оба пройти проверку ёмкости |
+| LOG-4 | Груз не имеет жизненного цикла после принятия оффера | CARGO | **HIGH** | `index.ts:2160-2217` — cargo-offer принят, но груз остаётся `active` навсегда. Нет `matched`/`in_transit`/`delivered` |
+| LOG-5 | Отмена оффера не возвращает ёмкость поездки | CARGO | **HIGH** | `index.ts:1914-1930` — ёмкость уменьшается при accept, но НЕ возвращается при cancel/reject |
+| LOG-6 | Принятие предложения в чате — полный скан ВСЕХ оферов | CARGO | **HIGH** | `index.ts:2755` — `kv.getByPrefix('ovora:offer:')` сканирует ВСЕ оферы. O(N) вместо O(1) |
+| LOG-7 | Самовосстановление оффера из regex текста чата | CARGO | **MEDIUM** | `index.ts:2778-2823` — если оффер не найден, парсит текст regex: `weightStr.match(/(\d+)\s*взр/)` |
+| LOG-8 | Цена не проверяется на сервере — клиент ставит любую | CARGO+AVIA | **MEDIUM** | `index.ts:1588` — `totalPrice` из body, без проверки `pricePerSeat * seats + pricePerKg * weight` |
+| LOG-9 | OCR fallback = автоподтверждение любого документа | CARGO | **MEDIUM** | `index.ts:3473-3478` — если OCR.space недоступен, `detectedType = 'unknown'` → проходит проверку типа |
+| LOG-10 | Нет `cancelled` статуса для курьера (только админ) | AVIA | **MEDIUM** | `aviaRoutes.tsx:2146` — только admin moderation. Курьер может только `close` |
+| LOG-11 | `close` не отменяет сделки — рейс закрывается с активными deals | AVIA | **MEDIUM** | `aviaRoutes.tsx:808-832` — `close` не проверяет pending/accepted deals |
+| LOG-12 | Чёрный список не проверяется при входе в AVIA | AVIA | **MEDIUM** | `aviaRoutes.tsx:182-224` — проверка только при register/phone-check |
+| LOG-13 | Старый AVIA код в index.ts — мёртвый код | AVIA | **LOW** | `index.ts:8280-8611+` — старые `/avia/*` роуты, `setupAviaRoutes()` их перезаписывает |
+| LOG-14 | Удаление отзыва не пересчитывает driverRating | CARGO | **LOW** | `index.ts:2420-2446` — snapshot рейтинга устаревает до следующего отзыва |
+| LOG-15 | ID поездок timestamp-based — collision-prone | CARGO | **LOW** | `index.ts:1081` — `${Date.now()}_${Math.random().slice(2,8)}` |
+
+**Что AVIA делает лучше CARGO (внедрить на CARGO стороне):**
+
+| Механизм | AVIA (хорошо) | CARGO (проблема) |
+|---|---|---|
+| Управление ёмкостью | `adjustFlightCapacity()` + optimistic lock | Нет lock, нет reverse path |
+| Репозиторий | `aviaRepo.tsx` — отдельный слой данных | Всё в монолитном `index.ts` |
+| Кеш | LRU 50K записей (`cache.tsx`) | 0 кеша |
+| Статусы сделок | Явные PATCH: `/accept`, `/reject`, `/cancel`, `/complete` | PUT с body merge |
+| POD (доставка) | Обязательные фото pickup + delivery | Нет POD для CARGO |
+| Undo-reject | 5 минут на отмену отказа | Нет undo |
+| Напоминания | Авто через 24ч | Нет напоминаний |
 
 #### Проверка Claude: задание MiMo №1 — 2026-09-14
 
