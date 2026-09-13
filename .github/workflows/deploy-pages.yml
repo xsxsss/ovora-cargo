@@ -2,7 +2,9 @@ name: Deploy to GitHub Pages
 
 on:
   push:
-    branches: [main, 'claude/**']
+    # claude/** и mimo/** — ветки агентов: CI их проверяет, но на сайт не выкладывает
+    # (шаги upload/deploy ниже срабатывают только для main).
+    branches: [main, 'claude/**', 'mimo/**']
   workflow_dispatch:
 
 permissions:
@@ -28,14 +30,16 @@ jobs:
       - name: Install dependencies
         run: npm ci --legacy-peer-deps
 
+      # Ошибки типов и lint блокируют деплой: раньше ошибки игнорировались, и сломанный
+      # код уходил на сайт. Снято, когда typecheck и lint дошли до 0 ошибок.
       - name: Type check
-        run: npm run typecheck || true
+        run: npm run typecheck
 
       - name: Tests
         run: npm run test
 
       - name: Lint
-        run: npm run lint || true
+        run: npm run lint
 
       - name: Build
         run: npm run build
