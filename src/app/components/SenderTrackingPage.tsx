@@ -168,11 +168,11 @@ export function SenderTrackingPage() {
         price: activeTrip.price ? `${activeTrip.price} ${activeTrip.currency || 'TJS'}` : '',
         notes: activeTrip.notes,
       }
-    : { type: 'Электроника', weight: '850', price: '7 504 TJS', notes: 'Хрупкий груз' };
+    : { type: '', weight: '', price: '', notes: '' };
 
   const driver = activeTrip
     ? { name: activeTrip.driverName || activeTrip.contactName || 'Водитель', phone: activeTrip.driverPhone || activeTrip.contactPhone || '', avatar: activeTrip.driverAvatar || activeTrip.contactAvatar || '', rating: 4.9, vehicle: activeTrip.vehicleType || '' }
-    : { name: 'Фаррух С.', phone: '+992 900 000 000', avatar: AVATARS.male1, rating: 4.9, vehicle: 'Volvo FH16' };
+    : { name: '', phone: '', avatar: '', rating: 0, vehicle: '' };
 
   // ── Sheet drag ──────────────────────────────────────────────────────────────
   const onSheetTouchStart = (e: React.TouchEvent) => {
