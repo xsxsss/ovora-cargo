@@ -505,6 +505,25 @@ React Router v7, Vite 6, Hono, Supabase, Radix, Tailwind v4, Deno и т.д. Зн
 | UX-11 | Cargo статус никогда не меняется после accept оффера | **LOW** | `SenderCargoForm.tsx:111` — `status: 'active'`. Нет UI для `completed`/`in_transit`. Дубль LOG-4 |
 | UX-12 | SenderTrackingPage fallback — демо-данные вместо пустого экрана | **LOW** | `SenderTrackingPage.tsx:171` — `'Электроника'`, `'850'`, `'7 504 TJS'` когда `activeTrip === null` |
 
+#### Аудит корневого уровня данных (KV модель) — MiMo 2026-09-14
+
+Полная карта KV-хранилища, связи сущностей, каскады, целостность данных. Проверено по коду.
+
+| ID | Что | Серьёзность | Доказательство |
+|---|---|---|---|
+| ROOT-1 | Ёмкость не восстанавливается при отмене оффера (только admin path) | **CRITICAL** | `index.ts:1931-1941` — accept снижает. `index.ts:1950-1956` — reject/cancel НЕ возвращает. Admin `5204-5216` — возвращает. Три места, два без restore |
+| ROOT-2 | Удаление пользователя — 0 каскадов. Все trips/offers/chats/reviews/notifications/docs осиротевают | **CRITICAL** | `index.ts:5493-5499` — удаляет только `user:email` и `user:phone`. 15+ типов записей не тронуты |
+| ROOT-3 | Race condition при параллельном accept оферов — нет блокировки | **CRITICAL** | `index.ts:1908-1922` + `2866-2880` — read-check-write без lock. Два concurrent accept оба проходят проверку |
+| ROOT-4 | Отмена поездки не отменяет её офферы — accepted висят на cancelled trip | **HIGH** | `index.ts:1390-1411` — `DELETE /trips` ставит cancelled, удаляет drivertrips index, НЕ трогает offers |
+| ROOT-5 | Cargo-offers не имеют учёта ёмкости — несколько accept на один груз | **HIGH** | `index.ts:2196-2253` — нет проверки `cargoCapacity`, нет аналога `availableSeats` для грузов |
+| ROOT-6 | Нет отзыва JWT токена пользователя — 30 дней без logout | **HIGH** | `userAuth.tsx:18` — TTL 30 дней, нет endpoint logout, нет per-user revocation. Admin имеет `jwt_revoked_at`, user — нет |
+| ROOT-7 | Email throttle ключи `ovora:email:throttle:*` накапливаются вечно | **MEDIUM** | `email.tsx:121-128` — `throttleEmail()` создаёт ключ, никогда не удаляет. 1000 юзеров × 500 trips = 10000+ ключей навсегда |
+| ROOT-8 | Regex self-heal создаёт фантомные офферы из текста чата | **MEDIUM** | `index.ts:2817-2858` — если offer не найден, парсит regex `weightStr.match(/(\d+)\s*взр/)`. `requestedSeats=0` при несовпадении |
+| ROOT-9 | Удаление отзыва не пересчитывает driverRating | **MEDIUM** | `index.ts:5244-5268` — admin DELETE review не вызывает `calculateAverageRating()`. Старый snapshot живёт до следующего отзыва |
+| ROOT-10 | Cargo-offer индексы не восстанавливаются (нет rebuild) | **MEDIUM** | `index.ts` — `drivercargooffers`/`sendercargooffers` GET не делают full-scan fallback + rebuild (в отличие от trip offers) |
+| ROOT-11 | Chatmeta не имеет индекса — full scan `ovora:chatmeta:` для поиска чатов юзера | **MEDIUM** | `index.ts:3053` — `kv.getByPrefix('ovora:chatmeta:')` + filter participants. O(N) на каждый запрос чатов |
+| ROOT-12 | Пуши и документы удаляют только вручную — накапливаются для deleted users | **LOW** | `ovora:push:sub:*`, `ovora:document:*` — нет cleanup при удалении юзера |
+
 #### Проверка Claude: аудит UX-1…UX-12 — 2026-09-14
 
 Проверены по коду находки уровня CRITICAL и HIGH и ещё три. Остальные (UX-5, UX-8,
