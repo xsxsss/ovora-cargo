@@ -23,7 +23,6 @@ import { AuditLog as AviaAuditLog } from "./aviaAudit.tsx";
 import { syncAuthIdentity, buildDisplayName } from "./authIdentity.tsx";
 import { getLoginDevices } from "./deviceInfo.tsx";
 import { handleSendOtp, handleVerifyOtp } from "./otp.tsx";
-import { handleGenerateBackup, handleVerifyBackup, handleBackupExists } from "./backup.tsx";
 import { handleEmailCheck, handleSetCode, handleVerifyPermCode, handleResetCode, handleAdminListCodes, handleSendEmailCode, handleVerifyEmailCode } from "./permCode.tsx";
 import {
   sendEmail, throttleEmail, setUnsubscribed,
@@ -6241,11 +6240,6 @@ app.post("/make-server-4e36197a/auth/verify-perm-code", handleVerifyPermCode);
 // поставить свой (захват аккаунта). UI-гейт isAdmin был только клиентским.
 app.post("/make-server-4e36197a/auth/reset-code", requireAdminChecked, handleResetCode);
 app.get("/make-server-4e36197a/admin/codes", handleAdminListCodes);
-
-// ── Backup Recovery Code ──────────────────────────────────────────────────────
-app.post("/make-server-4e36197a/auth/backup/generate", handleGenerateBackup);
-app.post("/make-server-4e36197a/auth/backup/verify", handleVerifyBackup);
-app.get("/make-server-4e36197a/auth/backup/exists/:email", handleBackupExists);
 
 // ══════════════════════════════════════════════════════════════════════════════
 //  ADS (BANNERS) ROUTES
