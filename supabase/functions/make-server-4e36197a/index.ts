@@ -1286,19 +1286,27 @@ app.put("/make-server-4e36197a/trips/:id", async (c) => {
       'notes', 'vehicle', 'fromLat', 'fromLng', 'toLat', 'toLng',
     ] as const;
 
+    const ALL_STATUSES = ['planned','active','inProgress','frozen','completed','cancelled'];
     const VALID_STATUS_TRANSITIONS: Record<string, string[]> = {
-      active:      ['inProgress', 'frozen', 'cancelled'],
-      inProgress:  ['completed', 'frozen', 'cancelled'],
-      frozen:      ['active', 'inProgress', 'cancelled'],
-      completed:   [],
-      cancelled:   [],
+      planned:    ['inProgress', 'frozen', 'cancelled'],
+      active:     ['inProgress', 'frozen', 'cancelled'], // старые поездки: бэкенд ставил active по умолчанию
+      inProgress: ['completed', 'frozen', 'cancelled'],
+      frozen:     ['planned', 'active', 'inProgress', 'cancelled'],
+      completed:  [],
+      cancelled:  [],
     };
 
     // Проверяем запрос на статус
     if (body.status && body.status !== existing.status) {
+      if (!ALL_STATUSES.includes(body.status)) {
+        return c.json({ error: `Неизвестный статус: ${body.status}` }, 400);
+      }
       const allowed = VALID_STATUS_TRANSITIONS[existing.status];
-      if (!allowed || !allowed.includes(body.status)) {
+      if (allowed && !allowed.includes(body.status)) {
         return c.json({ error: `Недопустимый переход: ${existing.status} → ${body.status}` }, 400);
+      }
+      if (!allowed) {
+        console.warn(`[PUT /trips] Неизвестный текущий статус ${existing.status} — переход пропущен`);
       }
     }
 
