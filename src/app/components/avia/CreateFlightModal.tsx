@@ -158,6 +158,7 @@ export function CreateFlightModal({ user, onClose, onSuccess }: Props) {
 
   const [docsEnabled, setDocsEnabled] = useState(false);
   const [docsPrice, setDocsPrice] = useState('');
+  const [docsCount, setDocsCount] = useState('');
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -170,7 +171,8 @@ export function CreateFlightModal({ user, onClose, onSuccess }: Props) {
     to.trim().length >= 2 &&
     !!date &&
     (cargoEnabled || docsEnabled) &&
-    (!cargoEnabled || Number(cargoKg) > 0);
+    (!cargoEnabled || Number(cargoKg) > 0) &&
+    (!docsEnabled  || Number(docsCount) > 0);
 
   const handleSubmit = async () => {
     if (!isValid) { setError('Заполните обязательные поля'); return; }
@@ -189,6 +191,7 @@ export function CreateFlightModal({ user, onClose, onSuccess }: Props) {
         pricePerKg: cargoEnabled ? (Number(pricePerKg) || 0) : 0,
         docsEnabled,
         docsPrice: docsEnabled ? (Number(docsPrice) || 0) : 0,
+        docsCount: docsEnabled ? Math.floor(Number(docsCount) || 0) : 0,
         currency,
       } as any);
       if (result.error) throw new Error(result.error);
@@ -378,19 +381,32 @@ export function CreateFlightModal({ user, onClose, onSuccess }: Props) {
                 label="Документы / Конверты"
                 color="#a78bfa"
               >
-                <div style={{ marginTop: 12 }}>
-                  <label style={{ ...labelStyle, fontSize: 10 }}>
-                    Цена за пакет, {cur.symbol} ({cur.code})
-                  </label>
-                  <PriceInput
-                    value={docsPrice}
-                    onChange={setDocsPrice}
-                    placeholder="0"
-                    accentBorder="#a78bfa25"
-                    cur={cur}
-                  />
-                  <p style={{ fontSize: 10, color: '#4a6080', marginTop: 6 }}>
-                    Количество без ограничений — принимаете столько, сколько хотите
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginTop: 12 }}>
+                  <div>
+                    <label style={{ ...labelStyle, fontSize: 10 }}>Сколько пакетов приму *</label>
+                    <input
+                      type="number" value={docsCount} min="1" step="1"
+                      onChange={e => { setDocsCount(e.target.value); setError(''); }}
+                      placeholder="10"
+                      style={{ ...inputStyle, border: '1.5px solid #a78bfa25' }}
+                    />
+                  </div>
+                  <div>
+                    <label style={{ ...labelStyle, fontSize: 10 }}>
+                      Цена за пакет, {cur.symbol} ({cur.code})
+                    </label>
+                    <PriceInput
+                      value={docsPrice}
+                      onChange={setDocsPrice}
+                      placeholder="0"
+                      accentBorder="#a78bfa25"
+                      cur={cur}
+                    />
+                  </div>
+                  <p style={{ fontSize: 10, color: '#4a6080', gridColumn: '1 / -1', margin: 0 }}>
+                    Конверты тоже занимают место в багаже. Укажите, сколько реально
+                    увезёте — когда пакеты закончатся, рейс перестанет принимать заявки
+                    на документы.
                   </p>
                 </div>
               </TypeToggle>

@@ -6,7 +6,7 @@ import {
   X, MessageCircle, Send, ArrowLeft, User,
   Plane, Package, MessagesSquare, Clock,
   CheckCircle2, XCircle, AlertCircle,
-  ArrowRight, Scale, DollarSign, Loader2, Ban, Star, Trash2,
+  ArrowRight, Scale, FileText, DollarSign, Loader2, Ban, Star, Trash2,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import type { AviaChatMessage, AviaChat, AviaChatAdRef } from '../../api/aviaChatApi';
@@ -260,6 +260,18 @@ function DealOfferBubble({
                 <Scale style={{ width: 10, height: 10, color: '#6b8299' }} />
                 <span style={{ fontSize: 11, fontWeight: 700, color: '#c8daea' }}>
                   {meta.weightKg} кг
+                </span>
+              </div>
+            )}
+            {meta?.docsCount != null && meta.docsCount > 0 && (
+              <div style={{
+                display: 'flex', alignItems: 'center', gap: 4,
+                padding: '4px 9px', borderRadius: 8,
+                background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.08)',
+              }}>
+                <FileText style={{ width: 10, height: 10, color: '#6b8299' }} />
+                <span style={{ fontSize: 11, fontWeight: 700, color: '#c8daea' }}>
+                  {meta.docsCount} пакет(ов)
                 </span>
               </div>
             )}

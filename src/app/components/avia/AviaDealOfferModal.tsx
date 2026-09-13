@@ -35,6 +35,7 @@ export function AviaDealOfferModal({ me, flight, onClose, onSuccess, onOpenChat,
   const [dealType, setDealType] = useState<'cargo' | 'docs'>(initialType);
 
   const [weightKg, setWeightKg] = useState('');
+  const [docsCount, setDocsCount] = useState('1');
   const [message, setMessage] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -78,7 +79,13 @@ export function AviaDealOfferModal({ me, flight, onClose, onSuccess, onOpenChat,
   const currency = flight.currency || 'USD';
   const price = dealType === 'cargo'
     ? (flight.pricePerKg && weightKg ? Math.round(Number(weightKg) * flight.pricePerKg) : undefined)
-    : (flight.docsPrice || undefined);
+    : (flight.docsPrice ? Math.round(flight.docsPrice * (Number(docsCount) || 0)) : undefined);
+
+  // Сколько пакетов у курьера ещё свободно. null — рейс опубликован до
+  // появления лимита, у него документы остаются без ограничений.
+  const docsAvailable: number | null = (flight as any).docsCount == null
+    ? null
+    : Math.max(0, ((flight as any).docsFree || 0) - ((flight as any).docsReserved || 0));
 
   const handleWeightChange = (v: string) => {
     setWeightKg(v);
@@ -88,6 +95,7 @@ export function AviaDealOfferModal({ me, flight, onClose, onSuccess, onOpenChat,
     setDealType(t);
     setError('');
     if (t === 'docs') setWeightKg('');
+    if (t === 'cargo') setDocsCount('1');
   };
 
   // ref вместо стейта: при быстром даблклике второй вызов handleSubmit может
@@ -100,6 +108,14 @@ export function AviaDealOfferModal({ me, flight, onClose, onSuccess, onOpenChat,
     if (loading || submittingRef.current) return;
     if (dealType === 'cargo' && (!weightKg || Number(weightKg) <= 0)) {
       setError('Укажите вес в кг');
+      return;
+    }
+    if (dealType === 'docs' && (!docsCount || Number(docsCount) <= 0)) {
+      setError('Укажите количество пакетов');
+      return;
+    }
+    if (dealType === 'docs' && docsAvailable != null && Number(docsCount) > docsAvailable) {
+      setError(`У курьера осталось ${docsAvailable} пакет(ов)`);
       return;
     }
     submittingRef.current = true;
@@ -118,6 +134,7 @@ export function AviaDealOfferModal({ me, flight, onClose, onSuccess, onOpenChat,
       adTo,
       adDate,
       weightKg: dealType === 'cargo' ? Number(weightKg) : 0,
+      docsCount: dealType === 'docs' ? Math.floor(Number(docsCount)) : 0,
       price,
       currency,
       message: message.trim(),
@@ -147,6 +164,7 @@ export function AviaDealOfferModal({ me, flight, onClose, onSuccess, onOpenChat,
         dealId:         deal.id,
         dealType,
         weightKg:       dealType === 'cargo' ? Number(weightKg) : undefined,
+        docsCount:      dealType === 'docs'  ? Math.floor(Number(docsCount)) : undefined,
         price,
         currency,
         adFrom,
@@ -404,15 +422,37 @@ export function AviaDealOfferModal({ me, flight, onClose, onSuccess, onOpenChat,
                 </div>
               )}
 
-              {/* Docs note */}
+              {/* Пакеты документов — количество, как вес у груза */}
               {dealType === 'docs' && (
-                <div style={{
-                  padding: '10px 14px', borderRadius: 12,
-                  background: '#a78bfa08', border: '1px solid #a78bfa18',
-                }}>
-                  <p style={{ fontSize: 12, color: '#a78bfa', margin: 0, lineHeight: 1.5 }}>
-                    📄 Вы отправляете документы/конверты. Курьер принимает без ограничений по количеству.
-                  </p>
+                <div>
+                  <label style={labelStyle}>
+                    <FileText style={{ width: 11, height: 11, display: 'inline', marginRight: 4 }} />
+                    Сколько пакетов отправляете *
+                  </label>
+                  <input
+                    type="number"
+                    min={1}
+                    step={1}
+                    value={docsCount}
+                    onChange={e => { setDocsCount(e.target.value); setError(''); }}
+                    placeholder="Например: 2"
+                    style={inputStyle}
+                  />
+                  {docsAvailable !== null ? (
+                    <p style={{ fontSize: 10, color: '#3d5268', marginTop: 4 }}>
+                      Осталось у курьера:{' '}
+                      <span style={{ color: docsAvailable > 0 ? '#34d399' : '#f87171', fontWeight: 700 }}>
+                        {docsAvailable} пакет(ов)
+                      </span>
+                      {((flight as any).docsReserved || 0) > 0 && (
+                        <span style={{ color: '#f59e0b' }}> · {(flight as any).docsReserved} ожидает</span>
+                      )}
+                    </p>
+                  ) : (
+                    <p style={{ fontSize: 10, color: '#3d5268', marginTop: 4 }}>
+                      Курьер не указал лимит — количество не ограничено
+                    </p>
+                  )}
                 </div>
               )}
 

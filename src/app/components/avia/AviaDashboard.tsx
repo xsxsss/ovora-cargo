@@ -170,6 +170,12 @@ const FlightCard = memo(function FlightCard({
   const hasReserved = (flight.reservedKg || 0) > 0;
   const isCargoOn = flight.cargoEnabled ?? ((flight.freeKg || 0) > 0);
   const isDocsOn = flight.docsEnabled ?? false;
+  // Остаток пакетов. null — рейс опубликован до появления лимита, у него
+  // документы без ограничений; показываем текстом, а не числом.
+  const displayFreeDocs: number | null = flight.docsCount == null
+    ? null
+    : Math.max(0, (flight.docsFree || 0) - (flight.docsReserved || 0));
+  const hasReservedDocs = (flight.docsReserved || 0) > 0;
 
   const isDone = isClosed || isCompleted;
 
@@ -307,8 +313,21 @@ const FlightCard = memo(function FlightCard({
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <FileText style={{ width: 11, height: 11, color: isDone ? '#4a6080' : '#a78bfa', flexShrink: 0 }} />
             <span style={{ fontSize: 12, color: isDone ? '#4a6080' : '#c8dae8', fontWeight: 600 }}>
-              Документы принимаю
+              {displayFreeDocs === null
+                ? 'Документы принимаю'
+                : isDone
+                ? `${flight.docsCount} пакет(ов)`
+                : `${displayFreeDocs} пакет(ов) свободно`}
             </span>
+            {!isDone && hasReservedDocs && (
+              <span style={{
+                fontSize: 10, color: '#f59e0b', fontWeight: 600,
+                padding: '1px 6px', borderRadius: 5,
+                background: '#f59e0b12', border: '1px solid #f59e0b20',
+              }}>
+                {flight.docsReserved} ожидает
+              </span>
+            )}
             {!!flight.docsPrice && (
               <span style={{ fontSize: 12, color: isDone ? '#6b8299' : '#a78bfa', fontWeight: 700, marginLeft: 'auto' }}>
                 {flight.currency ? flight.currency + ' ' : '$'}{flight.docsPrice}/пакет

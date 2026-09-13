@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { X, Plane, Calendar, User, Clock, Phone, Copy, Check, MapPin, Weight, DollarSign, Hash, Pencil } from 'lucide-react';
+import { X, Plane, Calendar, User, Clock, Phone, Copy, Check, MapPin, Weight, DollarSign, Hash, Pencil, FileText } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { toast } from 'sonner';
 import type { AviaFlight } from '../../api/aviaApi';
@@ -275,6 +275,19 @@ export function FlightDetailModal({
           <InfoRow icon={Weight} label="Свободный вес" value={`${flight.freeKg} кг`} valueColor="#0ea5e9" />
           {!!flight.pricePerKg && (
             <InfoRow icon={DollarSign} label="Цена за кг" value={`$${flight.pricePerKg}`} valueColor="#34d399" />
+          )}
+          {flight.docsEnabled && (
+            <InfoRow
+              icon={FileText}
+              label="Свободно пакетов"
+              value={flight.docsCount == null
+                ? 'без ограничений'
+                : `${Math.max(0, (flight.docsFree || 0) - (flight.docsReserved || 0))} из ${flight.docsCount}`}
+              valueColor="#a78bfa"
+            />
+          )}
+          {!!flight.docsPrice && (
+            <InfoRow icon={DollarSign} label="Цена за пакет" value={`$${flight.docsPrice}`} valueColor="#34d399" />
           )}
           <InfoRow icon={User} label="Курьер" value={flight.courierName || maskPhone(flight.courierId)} />
           <InfoRow icon={Clock} label="Создано" value={`${fmtDateTime(flight.createdAt)} · ${daysSince(flight.createdAt)}`} />

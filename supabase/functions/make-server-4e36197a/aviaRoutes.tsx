@@ -63,6 +63,36 @@ export function setupAviaRoutes(app: Hono, deps: AviaDeps): void {
     return `admin:${c.get('adminRole') || 'unknown'}`;
   };
 
+  // ── Ёмкость рейса ──────────────────────────────────────────────────────────
+  // Груз считается в килограммах, документы — в пакетах. Раньше пакеты не
+  // считались вовсе: курьер мог набрать сколько угодно заявок на конверты и
+  // физически их не увезти, а рейс не исчезал из поиска. Обе ёмкости живут по
+  // одной схеме: заявка резервирует, приём списывает, отказ/отмена возвращают.
+  //
+  // change — знак изменения (+1/-1), умножается на объём сделки.
+  const adjustFlightCapacity = async (
+    deal: { adType?: string; adId?: string; dealType?: string; weightKg?: number; docsCount?: number },
+    change: { free?: number; reserved?: number },
+    now: string,
+  ): Promise<void> => {
+    if (deal.adType !== 'flight' || !deal.adId) return;
+    const flight: any = await Flights.get(deal.adId);
+    if (!flight) return;
+
+    // Сделки без dealType остались с прежних версий — это грузовые.
+    const isDocs = deal.dealType === 'docs';
+    const amount = isDocs ? (Number(deal.docsCount) || 0) : (Number(deal.weightKg) || 0);
+    if (amount <= 0) return;
+
+    const freeField     = isDocs ? 'docsFree'     : 'freeKg';
+    const reservedField = isDocs ? 'docsReserved' : 'reservedKg';
+
+    const next: any = { ...flight, updatedAt: now };
+    if (change.free)     next[freeField]     = Math.max(0, (flight[freeField]     || 0) + change.free     * amount);
+    if (change.reserved) next[reservedField] = Math.max(0, (flight[reservedField] || 0) + change.reserved * amount);
+    await Flights.set(deal.adId, next);
+  };
+
   // ── Rate limit middleware factory (shorthand) ──────────────────────────────
   const rlPhone = (preset: { max: number; windowMs: number }) =>
     rateLimitMiddleware(preset, (c) => {
@@ -594,7 +624,7 @@ export function setupAviaRoutes(app: Hono, deps: AviaDeps): void {
   app.post(`${P}/flights`, rlPhone(RL.GENERAL_WRITE), async (c) => {
     try {
       const body = await c.req.json();
-      const { courierId, from, to, date, flightNo, cargoEnabled, cargoKg, pricePerKg, docsEnabled, docsPrice, freeKg, currency } = body;
+      const { courierId, from, to, date, flightNo, cargoEnabled, cargoKg, pricePerKg, docsEnabled, docsPrice, docsCount, freeKg, currency } = body;
 
       if (!courierId || !from || !to || !date) return c.json({ error: 'Missing required fields: courierId, from, to, date' }, 400);
       if (!(await verifyAviaActor(c, aviaClean(courierId)))) return c.json({ error: 'Unauthorized' }, 401);
@@ -605,6 +635,12 @@ export function setupAviaRoutes(app: Hono, deps: AviaDeps): void {
 
       const actualCargoKg = isCargoEnabled ? (Number(cargoKg || freeKg) || 0) : 0;
       if (isCargoEnabled && actualCargoKg <= 0) return c.json({ error: 'Укажите количество кг для груза' }, 400);
+
+      // Пакеты документов ограничены так же, как килограммы: курьер должен
+      // сказать, сколько реально увезёт.
+      const actualDocsCount = isDocsEnabled ? Math.floor(Number(docsCount) || 0) : 0;
+      if (isDocsEnabled && actualDocsCount <= 0) return c.json({ error: 'Укажите, сколько пакетов документов вы примете' }, 400);
+      if (actualDocsCount > 500) return c.json({ error: 'Слишком много пакетов — укажите не больше 500' }, 400);
 
       const user = await Users.get(courierId);
       if (!user) return c.json({ error: 'User not found' }, 404);
@@ -627,6 +663,9 @@ export function setupAviaRoutes(app: Hono, deps: AviaDeps): void {
         pricePerKg   : Number(pricePerKg) || 0,
         docsEnabled  : isDocsEnabled,
         docsPrice    : isDocsEnabled ? (Number(docsPrice) || 0) : 0,
+        docsCount    : actualDocsCount,
+        docsFree     : actualDocsCount,
+        docsReserved : 0,
         currency     : (currency && typeof currency === 'string') ? currency.toUpperCase() : 'USD',
         status       : 'active',
         createdAt    : new Date().toISOString(),
@@ -648,7 +687,7 @@ export function setupAviaRoutes(app: Hono, deps: AviaDeps): void {
     try {
       const id   = c.req.param('id');
       const body = await c.req.json();
-      const { callerPhone, pricePerKg, docsPrice, currency, flightNo, date } = body;
+      const { callerPhone, pricePerKg, docsPrice, docsCount, currency, flightNo, date } = body;
       const clean = aviaClean(callerPhone || '');
       if (!clean) return c.json({ error: 'callerPhone is required' }, 400);
       if (!(await verifyAviaActor(c, clean))) return c.json({ error: 'Unauthorized' }, 401);
@@ -666,6 +705,17 @@ export function setupAviaRoutes(app: Hono, deps: AviaDeps): void {
       const updates: Partial<AviaFlight> = { updatedAt: new Date().toISOString() };
       if (pricePerKg !== undefined) updates.pricePerKg = Number(pricePerKg) || 0;
       if (docsPrice  !== undefined) updates.docsPrice  = Number(docsPrice)  || 0;
+      // Менять потолок пакетов можно, но не ниже уже занятого: иначе учёт
+      // разъедется и свободных пакетов окажется отрицательное число.
+      if (docsCount !== undefined) {
+        const next = Math.floor(Number(docsCount) || 0);
+        if (next <= 0)   return c.json({ error: 'Количество пакетов должно быть больше нуля' }, 400);
+        if (next > 500)  return c.json({ error: 'Слишком много пакетов — укажите не больше 500' }, 400);
+        const taken = (flight.docsCount || 0) - (flight.docsFree || 0); // уже принято
+        if (next < taken) return c.json({ error: `Уже принято ${taken} пакет(ов) — меньше этого числа поставить нельзя` }, 400);
+        updates.docsCount = next;
+        updates.docsFree  = next - taken;
+      }
       if (currency   !== undefined && typeof currency === 'string') updates.currency = currency.toUpperCase();
       if (flightNo   !== undefined) updates.flightNo   = String(flightNo).trim();
       if (date       !== undefined && date) updates.date = date;
@@ -807,7 +857,7 @@ export function setupAviaRoutes(app: Hono, deps: AviaDeps): void {
       }
 
       const now     = new Date().toISOString();
-      const updated = { ...flight, status: 'completed', completedAt: now, updatedAt: now, freeKg: 0, reservedKg: 0 };
+      const updated = { ...flight, status: 'completed', completedAt: now, updatedAt: now, freeKg: 0, reservedKg: 0, docsFree: 0, docsReserved: 0 };
       await Flights.set(id, updated);
       await AuditLog.record({ action: 'flight.complete', actorPhone: clean, targetId: id, targetType: 'flight' });
 
@@ -1126,18 +1176,13 @@ export function setupAviaRoutes(app: Hono, deps: AviaDeps): void {
               await Deals.set(deal.id, { ...deal, status: 'cancelled', cancelledAt: now, updatedAt: now, cancelReason: 'chat_deleted' });
               cancelledDealIds.push(deal.id);
 
-              // Возврат ёмкости рейса
-              if ((deal.dealType === 'cargo' || !deal.dealType) && deal.adType === 'flight') {
-                const flight = await Flights.get(deal.adId);
-                if (flight) {
-                  const kg = deal.weightKg || 0;
-                  if (deal.status === 'accepted') {
-                    await Flights.set(deal.adId, { ...flight, freeKg: (flight.freeKg || 0) + kg, updatedAt: now });
-                  } else {
-                    await Flights.set(deal.adId, { ...flight, reservedKg: Math.max(0, (flight.reservedKg || 0) - kg), updatedAt: now });
-                  }
-                }
-              }
+              // Возврат ёмкости рейса: принятая сделка уже списала место —
+              // возвращаем его, непринятая лишь держала резерв — снимаем резерв.
+              await adjustFlightCapacity(
+                deal,
+                deal.status === 'accepted' ? { free: +1 } : { reserved: -1 },
+                now,
+              );
             }
             if (cancelledDealIds.length > 0) {
               await Notifs.push(otherPhone, {
@@ -1176,7 +1221,7 @@ export function setupAviaRoutes(app: Hono, deps: AviaDeps): void {
   app.post(`${P}/deals`, rlPhone(RL.DEAL_CREATE), async (c) => {
     try {
       const body = await c.req.json();
-      const { initiatorPhone, initiatorName, recipientPhone, recipientName, adType, adId, adFrom, adTo, adDate, weightKg, price, currency, message, courierId, senderId, courierName, senderName, dealType } = body;
+      const { initiatorPhone, initiatorName, recipientPhone, recipientName, adType, adId, adFrom, adTo, adDate, weightKg, docsCount, price, currency, message, courierId, senderId, courierName, senderName, dealType } = body;
 
       if (!initiatorPhone || !recipientPhone || !adType || !adId || !courierId || !senderId) return c.json({ error: 'Missing required fields' }, 400);
 
@@ -1192,23 +1237,41 @@ export function setupAviaRoutes(app: Hono, deps: AviaDeps): void {
       const duplicate = await Deals.findActiveByInitiatorAndAd(p1, adId, adType, p2);
       if (duplicate) return c.json({ error: 'Вы уже отправили предложение по этому объявлению', dealId: duplicate.id }, 409);
 
-      // Резервирование ёмкости (грузовые сделки по рейсу).
+      // Сколько пакетов документов отправляют. По умолчанию один — так вела
+      // себя прежняя версия, где количество вообще не спрашивали.
+      const requestedDocs = resolvedDealType === 'docs'
+        ? Math.max(1, Math.floor(Number(docsCount) || 1))
+        : 0;
+      if (requestedDocs > 500) return c.json({ error: 'Слишком много пакетов за одну заявку' }, 400);
+
+      // Резервирование ёмкости рейса — и для груза (кг), и для документов (пакеты).
       // ✅ KV-хранилище не даёт атомарного CAS, поэтому защищаемся optimistic-lock'ом:
       // после записи перечитываем рейс и проверяем, что именно НАША запись там лежит —
       // если кто-то успел вмешаться между чтением и записью, повторяем попытку с
       // актуальными цифрами (иначе два параллельных запроса могли оба пройти проверку
       // available и забронировать больше места, чем есть на рейсе).
-      if (resolvedDealType === 'cargo' && adType === 'flight') {
-        const requested = Number(weightKg) || 0;
+      if (adType === 'flight') {
+        const isDocs    = resolvedDealType === 'docs';
+        const requested = isDocs ? requestedDocs : (Number(weightKg) || 0);
+        const unit      = isDocs ? 'пакет(ов)' : 'кг';
         let reserved = false;
         for (let attempt = 0; attempt < 5 && !reserved; attempt++) {
-          const flight = await Flights.get(adId);
-          if (!flight?.cargoEnabled) { reserved = true; break; }
-          const available = (flight.freeKg || 0) - (flight.reservedKg || 0);
-          if (requested > available) return c.json({ error: `Недостаточно места: доступно ${available} кг, запрошено ${requested} кг` }, 400);
+          const flight: any = await Flights.get(adId);
+          if (!flight) { reserved = true; break; }
+          if (isDocs ? !flight.docsEnabled : !flight.cargoEnabled) { reserved = true; break; }
+          // Рейсы, созданные до появления лимита пакетов, живут без docsCount —
+          // у них документы остаются без ограничений, как и были опубликованы.
+          if (isDocs && flight.docsCount == null) { reserved = true; break; }
+
+          const freeField     = isDocs ? 'docsFree'     : 'freeKg';
+          const reservedField = isDocs ? 'docsReserved' : 'reservedKg';
+          const available = (flight[freeField] || 0) - (flight[reservedField] || 0);
+          if (requested > available) {
+            return c.json({ error: `Недостаточно места: доступно ${available} ${unit}, запрошено ${requested} ${unit}` }, 400);
+          }
           const writeTs = new Date().toISOString();
-          await Flights.set(adId, { ...flight, reservedKg: (flight.reservedKg || 0) + requested, updatedAt: writeTs });
-          const verify = await Flights.get(adId);
+          await Flights.set(adId, { ...flight, [reservedField]: (flight[reservedField] || 0) + requested, updatedAt: writeTs });
+          const verify: any = await Flights.get(adId);
           if (verify?.updatedAt === writeTs) reserved = true;
         }
         if (!reserved) return c.json({ error: 'Не удалось зарезервировать место на рейсе, попробуйте ещё раз' }, 409);
@@ -1223,6 +1286,7 @@ export function setupAviaRoutes(app: Hono, deps: AviaDeps): void {
         adType, adId,
         adFrom: adFrom || '', adTo: adTo || '', adDate: adDate || null,
         weightKg    : resolvedDealType === 'cargo' ? (Number(weightKg) || 0) : 0,
+        docsCount   : requestedDocs,
         price       : price ? Number(price) : null,
         currency    : currency || 'USD',
         message     : message || '',
@@ -1410,14 +1474,8 @@ export function setupAviaRoutes(app: Hono, deps: AviaDeps): void {
       const updated = { ...deal, status: 'accepted', acceptedAt: now, updatedAt: now };
       await Deals.set(id, updated);
 
-      // Декремент freeKg при грузовой сделке
-      if ((deal.dealType === 'cargo' || !deal.dealType) && deal.adType === 'flight') {
-        const flight = await Flights.get(deal.adId);
-        if (flight) {
-          const kg = deal.weightKg || 0;
-          await Flights.set(deal.adId, { ...flight, freeKg: Math.max(0, (flight.freeKg || 0) - kg), reservedKg: Math.max(0, (flight.reservedKg || 0) - kg), updatedAt: now });
-        }
-      }
+      // Место занято окончательно: списываем со свободного и снимаем резерв.
+      await adjustFlightCapacity(deal, { free: -1, reserved: -1 }, now);
 
       await AuditLog.record({ action: 'deal.accept', actorPhone: clean, targetId: id, targetType: 'deal' });
       await injectDealUpdateMessage(deal, 'Предложение принято', 'accepted');
@@ -1455,10 +1513,7 @@ export function setupAviaRoutes(app: Hono, deps: AviaDeps): void {
       await Deals.set(id, updated);
 
       // Возврат резервирования
-      if ((deal.dealType === 'cargo' || !deal.dealType) && deal.adType === 'flight') {
-        const flight = await Flights.get(deal.adId);
-        if (flight) await Flights.set(deal.adId, { ...flight, reservedKg: Math.max(0, (flight.reservedKg || 0) - (deal.weightKg || 0)), updatedAt: now });
-      }
+      await adjustFlightCapacity(deal, { reserved: -1 }, now);
 
       await AuditLog.record({ action: 'deal.reject', actorPhone: clean, targetId: id, targetType: 'deal', details: { reason: reason || '' } });
       await injectDealUpdateMessage(deal, 'Предложение отклонено', 'rejected');
@@ -1502,10 +1557,7 @@ export function setupAviaRoutes(app: Hono, deps: AviaDeps): void {
       await Deals.set(id, updated);
 
       // Возвращаем резервирование, которое reject снял
-      if ((deal.dealType === 'cargo' || !deal.dealType) && deal.adType === 'flight') {
-        const flight = await Flights.get(deal.adId);
-        if (flight) await Flights.set(deal.adId, { ...flight, reservedKg: (flight.reservedKg || 0) + (deal.weightKg || 0), updatedAt: now });
-      }
+      await adjustFlightCapacity(deal, { reserved: +1 }, now);
 
       await AuditLog.record({ action: 'deal.undo-reject', actorPhone: clean, targetId: id, targetType: 'deal' });
       await injectDealUpdateMessage(deal, 'Отклонение отменено — предложение снова активно', 'pending');
@@ -1541,10 +1593,7 @@ export function setupAviaRoutes(app: Hono, deps: AviaDeps): void {
       const updated = { ...deal, status: 'cancelled', cancelledAt: now, updatedAt: now };
       await Deals.set(id, updated);
 
-      if ((deal.dealType === 'cargo' || !deal.dealType) && deal.adType === 'flight') {
-        const flight = await Flights.get(deal.adId);
-        if (flight) await Flights.set(deal.adId, { ...flight, reservedKg: Math.max(0, (flight.reservedKg || 0) - (deal.weightKg || 0)), updatedAt: now });
-      }
+      await adjustFlightCapacity(deal, { reserved: -1 }, now);
 
       await AuditLog.record({ action: 'deal.cancel', actorPhone: clean, targetId: id, targetType: 'deal' });
       await injectDealUpdateMessage(deal, 'Предложение отменено', 'cancelled');

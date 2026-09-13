@@ -41,6 +41,12 @@ export function EditFlightModal({ flight, onClose, onSaved }: Props) {
   const [currency, setCurrency] = useState(flight.currency || 'USD');
   const [pricePerKg, setPricePerKg] = useState(String(flight.pricePerKg ?? ''));
   const [docsPrice, setDocsPrice] = useState(String(flight.docsPrice ?? ''));
+  const [docsCount, setDocsCount] = useState(String(flight.docsCount ?? ''));
+  // Уже принятые пакеты — ниже этого числа лимит не опустить, иначе учёт
+  // свободных пакетов уйдёт в минус. Тот же расчёт делает и сервер.
+  const docsTaken = flight.docsCount == null
+    ? 0
+    : Math.max(0, (flight.docsCount || 0) - (flight.docsFree || 0));
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -58,6 +64,9 @@ export function EditFlightModal({ flight, onClose, onSaved }: Props) {
         currency,
         pricePerKg: flight.cargoEnabled ? (Number(pricePerKg) || 0) : flight.pricePerKg,
         docsPrice: flight.docsEnabled ? (Number(docsPrice) || 0) : flight.docsPrice,
+        ...(flight.docsEnabled && Number(docsCount) > 0
+          ? { docsCount: Math.floor(Number(docsCount)) }
+          : {}),
       });
       if (result.error) throw new Error(result.error);
       if (result.flight) onSaved(result.flight);
@@ -194,15 +203,31 @@ export function EditFlightModal({ flight, onClose, onSaved }: Props) {
           )}
 
           {flight.docsEnabled && (
-            <div style={{ marginBottom: 14 }}>
-              <label style={labelStyle}>Цена за пакет документов, {cur.symbol} ({cur.code})</label>
-              <input
-                type="number" value={docsPrice} min="0" step="0.5"
-                onChange={e => setDocsPrice(e.target.value)}
-                placeholder="0"
-                style={{ ...inputStyle, border: '1.5px solid #a78bfa25' }}
-              />
-            </div>
+            <>
+              <div style={{ marginBottom: 14 }}>
+                <label style={labelStyle}>Сколько пакетов приму</label>
+                <input
+                  type="number" value={docsCount} min={Math.max(1, docsTaken)} step="1"
+                  onChange={e => setDocsCount(e.target.value)}
+                  placeholder="10"
+                  style={{ ...inputStyle, border: '1.5px solid #a78bfa25' }}
+                />
+                {docsTaken > 0 && (
+                  <p style={{ fontSize: 10, color: '#4a6080', marginTop: 4 }}>
+                    Уже принято {docsTaken} пакет(ов) — меньше поставить нельзя
+                  </p>
+                )}
+              </div>
+              <div style={{ marginBottom: 14 }}>
+                <label style={labelStyle}>Цена за пакет документов, {cur.symbol} ({cur.code})</label>
+                <input
+                  type="number" value={docsPrice} min="0" step="0.5"
+                  onChange={e => setDocsPrice(e.target.value)}
+                  placeholder="0"
+                  style={{ ...inputStyle, border: '1.5px solid #a78bfa25' }}
+                />
+              </div>
+            </>
           )}
 
           {/* Error */}

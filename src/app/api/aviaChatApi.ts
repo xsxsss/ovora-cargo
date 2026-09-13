@@ -36,6 +36,8 @@ export interface DealMessageMeta {
   dealId:         string;
   dealType?:      string;
   weightKg?:      number;
+  /** Сколько пакетов документов — показывается в карточке сделки в чате */
+  docsCount?:     number;
   price?:         number | null;
   currency?:      string;
   adFrom?:        string;

@@ -71,6 +71,11 @@ export interface AviaFlight {
   // Docs
   docsEnabled?: boolean;
   docsPrice?: number;
+  /** Сколько пакетов документов курьер готов взять. null — рейс создан до
+   *  появления лимита, у него документы без ограничений. */
+  docsCount?: number | null;
+  docsFree?: number;
+  docsReserved?: number;
   // Currency (backward-compat default: 'USD')
   currency?: string;
   status: string;
@@ -415,7 +420,7 @@ export async function createAviaFlight(flightData: Partial<AviaFlight>): Promise
 export async function updateAviaFlight(
   id: string,
   callerPhone: string,
-  updates: { pricePerKg?: number; docsPrice?: number; currency?: string; flightNo?: string; date?: string },
+  updates: { pricePerKg?: number; docsPrice?: number; docsCount?: number; currency?: string; flightNo?: string; date?: string },
 ): Promise<{ success: boolean; flight?: AviaFlight; error?: string }> {
   const res = await fetch(`${BASE}/avia/flights/${encodeURIComponent(id)}`, {
     method: 'PATCH',

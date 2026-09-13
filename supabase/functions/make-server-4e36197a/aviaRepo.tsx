@@ -93,6 +93,15 @@ export interface AviaFlight {
   pricePerKg    : number;
   docsEnabled   : boolean;
   docsPrice     : number;
+  /** Сколько пакетов документов курьер готов взять. Документы считаются
+   *  в штуках и НЕ вычитаются из грузовых килограммов — у курьера это
+   *  отдельная «полка», и так же конверт продают DHL/FedEx: отдельной
+   *  позицией по фиксированной цене, а не по весу. */
+  docsCount     : number;
+  /** Сколько пакетов ещё свободно */
+  docsFree      : number;
+  /** Пакеты по заявкам, которые ждут ответа курьера */
+  docsReserved  : number;
   currency      : string;
   status        : string;
   isDeleted     ?: boolean;
@@ -140,6 +149,8 @@ export interface AviaDeal {
   courierName    : string;
   senderName     : string;
   dealType       : 'cargo' | 'docs';
+  /** Сколько пакетов документов отправляют (для dealType === 'docs') */
+  docsCount      ?: number;
   status         : string;
   createdAt      : string;
   updatedAt      : string;
@@ -316,8 +327,16 @@ export const Flights = {
         if (!f || typeof f !== 'object' || f.isDeleted) return false;
         // in_progress — поездка уже начата, скрываем от публичного поиска, чтобы не приходили новые заявки
         if (f.status === 'closed' || f.status === 'completed' || f.status === 'in_progress') return false;
-        // Грузовая ёмкость выбрана и полностью занята, документы не предлагаются — скрываем
-        if (f.cargoEnabled && !f.docsEnabled && (f.freeKg || 0) - (f.reservedKg || 0) <= 0) return false;
+        // Скрываем рейс, когда занято всё, что он предлагает. Раньше проверялся
+        // только груз, а документы считались безлимитными — рейс с документами
+        // не исчезал из поиска никогда, сколько бы заявок курьер ни набрал.
+        const cargoFull = !f.cargoEnabled || (f.freeKg || 0) - (f.reservedKg || 0) <= 0;
+        // Рейсы, созданные до появления лимита пакетов, живут без docsCount —
+        // для них документы по-прежнему без ограничений, чтобы не убрать из
+        // поиска уже опубликованные рейсы. Лимит появится при их правке.
+        const docsFull = !f.docsEnabled
+          || (f.docsCount == null ? false : (f.docsFree || 0) - (f.docsReserved || 0) <= 0);
+        if (cargoFull && docsFull) return false;
         return true;
       })
       .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());

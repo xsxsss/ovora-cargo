@@ -38,6 +38,8 @@ export interface AviaDeal {
   dealType?: AviaDealType;
   // Условия
   weightKg: number;
+  /** Сколько пакетов документов отправляют (для dealType === 'docs') */
+  docsCount?: number;
   price?: number | null;
   currency?: string;
   message?: string;
@@ -96,6 +98,7 @@ export async function createAviaDeal(params: {
   adTo: string;
   adDate?: string;
   weightKg: number;
+  docsCount?: number;
   price?: number;
   currency?: string;
   message?: string;
