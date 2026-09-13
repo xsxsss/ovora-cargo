@@ -154,9 +154,19 @@ X-Admin-Token: <jwt>          // payload: { role: 'super-admin' | 'cargo-admin' 
 | `YANDEX_GEOCODER_API_KEY` | Yandex Geocoder API |
 | `OCR_SPACE_API_KEY` | OCR.space для распознавания документов |
 
-**Критично:**
-- `ADMIN_JWT_SECRET` ещё не добавлен в Supabase Secrets — без него JWT не выдаётся, работает только legacy `X-Admin-Code` (роль `super-admin`). Роли `cargo-admin`/`avia-admin` недоступны, пока не настроены `ADMIN_JWT_SECRET` + соответствующий `ADMIN_ACCESS_CODE_*`.
-- `AVIA_JWT_SECRET` ещё не добавлен в Supabase Secrets — без него `verifyAviaActor()` в `aviaAuth.tsx` работает в legacy-режиме (пропускает все проверки без подтверждения личности), т.е. защита от подмены `callerPhone` в AVIA-эндпоинтах **не действует**, пока секрет не настроен.
+**Статус секретов (проверено по логам продакшена 2026-09-13):**
+- `ADMIN_JWT_SECRET` — **настроен**. В логах есть `Access granted (role=cargo-admin)` и `(role=avia-admin)`, а эти роли выдаются только через JWT.
+- `AVIA_JWT_SECRET` — **настроен**. Входы в AVIA идут без предупреждения `AVIA_JWT_SECRET not configured`.
+- `USER_JWT_SECRET` — **настроен**. На каждом входе в CARGO без секрета писалось бы `USER_JWT_SECRET not configured` — таких записей нет. Поэтому `getCallerEmail()` игнорирует `callerEmail` из тела запроса (legacy-фолбэк выключен).
+
+**Не делай выводов о секретах по коду или по этому файлу — проверяй логи.** Без секрета
+модули пишут предупреждение на каждом входе, так что его отсутствие в `function_logs` —
+надёжный признак, что секрет задан:
+```sql
+select event_message from logs where source = 'function_logs'
+  and event_message like '%JWT_SECRET not configured%'
+```
+Значения секретов не спрашивай и не проси вставить в чат — их добавляет владелец сам.
 
 ---
 
