@@ -449,6 +449,11 @@ export function DocumentVerificationPage() {
           description: uploadedDoc.rejectionReason || 'Документ не прошёл проверку.',
           duration: 7000,
         });
+      } else if (uploadedDoc.status === 'pending') {
+        toast(`📋 ${doc.title} отправлен на проверку`, {
+          description: 'Администратор проверит документ вручную.',
+          duration: 5000,
+        });
       }
       await loadDocuments();
       setTimeout(() => { setScanPhase('idle'); runScan(); }, 500);

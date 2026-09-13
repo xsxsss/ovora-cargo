@@ -14,7 +14,7 @@ export interface Document {
   type: string;
   title: string;
   subtitle: string;
-  status: 'verified' | 'rejected' | 'not_uploaded'; // ✅ Убрал 'pending' - только автоматическая верификация
+  status: 'verified' | 'rejected' | 'not_uploaded' | 'pending';
   photoUrl?: string;
   photoPath?: string;
   uploadDate?: string;
