@@ -627,6 +627,248 @@ UX-9, UX-10. **Не делать:** LOG-15, LOG-11, TYP-1 — отклонены
 **Правило после двух осечек:** на каждое утверждение — `file:line`, и проверяй **обе стороны**,
 фронт и бэк. LOG-1 и LOG-9 были отклонены именно потому, что проверена была одна сторона.
 
+#### Дизайн волны 2 — MiMo 2026-09-14
+
+##### 1. Одна функция учёта: `adjustTripCapacity`
+
+Аналог `adjustFlightCapacity` из `aviaRoutes.tsx:73-94`. Разница: CARGO не имеет
+фазы «резерв» (pending не блокирует ёмкость) — только списание при accept и
+возврат при reject/cancel.
+
+```ts
+// index.ts, рядом с импортами (~строка 50)
+async function adjustTripCapacity(
+  tripId: string,
+  offer: { requestedSeats?: number; requestedChildren?: number; requestedCargo?: number },
+  direction: -1 | 1,  // -1 = списание (accept), +1 = возврат (reject/cancel)
+): Promise<{ ok: boolean; error?: string }> {
+  const trip: any = await kv.get(`ovora:trip:${tripId}`);
+  if (!trip) return { ok: false, error: 'Trip not found' };
+
+  const seats   = offer.requestedSeats    || 0;
+  const children = offer.requestedChildren || 0;
+  const cargo   = offer.requestedCargo    || 0;
+
+  // При списании — проверяем достаточность (защита от overbooking)
+  if (direction === -1) {
+    if (seats    > (trip.availableSeats || 0) ||
+        children > (trip.childSeats    || 0) ||
+        cargo    > (trip.cargoCapacity || 0)) {
+      return { ok: false, error: 'INSUFFICIENT_CAPACITY' };
+    }
+  }
+
+  const next = {
+    ...trip,
+    updatedAt: new Date().toISOString(),
+    availableSeats: Math.max(0, (trip.availableSeats || 0) + direction * seats),
+    childSeats:     Math.max(0, (trip.childSeats    || 0) + direction * children),
+    cargoCapacity:  Math.max(0, (trip.cargoCapacity || 0) + direction * cargo),
+  };
+
+  // Optimistic lock: записываем updatedAt, перечитываем, сверяем
+  await kv.set(`ovora:trip:${tripId}`, next);
+  const verify: any = await kv.get(`ovora:trip:${tripId}`);
+  if (!verify || verify.updatedAt !== next.updatedAt) {
+    // Кто-то записал параллельно — retry (макс 3 раза)
+    return { ok: false, error: 'CONFLICT_RETRY' };
+  }
+  return { ok: true };
+}
+```
+
+**Почему direction, а не AVIA-style `{free, reserved}`:**
+У CARGO нет фазы резерва — pending оффер не занимает ёмкость. Два поля
+(`availableSeats`, `childSeats`, `cargoCapacity`) меняются только при accept/reject.
+`direction: -1 | 1` проще и не допускает ошибок в знаке.
+
+**Почему `Math.max(0, ...)`:**
+Даже если данные разъехались (старые офферы без restore), ёмкость не уйдёт в минус.
+Это defense-in-depth, а не основной механизм.
+
+##### 2. Полный список точек вызова
+
+| # | Точка | `file:line` | Что делает | direction |
+|---|---|---|---|---|
+| A | Offer page accept | `index.ts:1931-1947` | **Списание** ёмкости при `PUT /offers` accept | `-1` |
+| B | Offer page reject/cancel | `index.ts:1949-1966` | НЕТ возврата → **добавить** `+1` при `was accepted` | `+1` |
+| C | Chat proposal accept | `index.ts:2918-2938` | **Списание** при `PUT /chat/proposal` accept | `-1` |
+| D | Chat proposal reject | `index.ts:2948-3030` | НЕТ возврата → **добавить** `+1` при `was accepted` | `+1` |
+| E | Admin offer status | `index.ts:5204-5216` | Возврат без clamp → **заменить** на `adjustTripCapacity` | `+1` |
+| F | Trip cancel (`DELETE /trips`) | `index.ts:1387-1411` | НЕТ каскада → **добавить** отмену офферов + restore | `+1` для accepted |
+| G | Cargo-offer accept | `index.ts:2196-2221` | НЕТ проверки → **добавить** правило «только один accept» | — |
+
+**Точки A и C** — заменить инлайновый код на `adjustTripCapacity(tripId, offer, -1)`.
+При `CONFLICT_RETRY` — повторить до 3 раз, при `INSUFFICIENT_CAPACITY` — вернуть 409.
+
+**Точка B** — после `isFinalStatus` (строка 1950):
+```ts
+if (existing.status === 'accepted') {
+  await adjustTripCapacity(tripId, existing, 1);
+}
+```
+
+**Точка D** — аналогично, после `if (status === 'rejected' || status === 'declined')`.
+
+**Точка E** — заменить строки 5204-5216 на `adjustTripCapacity(tripId, existing, 1)`.
+Функция сама клампит к 0 — admin не может создать отрицательную ёмкость.
+
+**Точка F** — новый каскад (см. раздел 5).
+
+**Точка G** — отдельная логика (см. раздел 4).
+
+##### 3. Защита от гонки
+
+KV не имеет Compare-And-Swap. Стратегия — **optimistic lock через `updatedAt`**:
+
+1. `adjustTripCapacity` записывает `next.updatedAt = Date.now()`
+2. Сразу перечитывает `kv.get(tripId)`
+3. Если `verify.updatedAt !== next.updatedAt` — параллельная запись → возвращает `CONFLICT_RETRY`
+4. Вызывающий код повторяет (макс 3 раза с 100ms задержкой)
+5. После 3 неудач — возвращает 503 «Попробуйте позже»
+
+**Почему не как AVIA:**
+AVIA использует `writeTs` записанный в deal, а потом сверяет его с flight.updatedAt.
+У CARGO проще: `updatedAt` пишется в trip, сверяется trip с собой. Тот же принцип,
+другая точка записи.
+
+**Риск:** при очень высокой конкуренции (>3 параллельных accept на одну поездку)
+последний может не пройти. Для логистики это приемлемо — водитель просто повторит.
+
+##### 4. Грузы (Cargo) — правило «только один accept»
+
+**Решение:** не вводим ёмкость для груза. Вместо этого — **правило «принят только один оффер»**.
+
+**Обоснование:** Груз — это единичная заявка на перевозку. В отличие от поездки
+(где N мест), груз целиком один. Второй принятый оффер на тот же груз = два водителя
+едут за одной посылкой. Это не overbooking, это баг.
+
+**Реализация** — в `PUT /cargo-offers` (`index.ts:2196`), перед записью:
+```ts
+if (updated.status === 'accepted' && existing.status !== 'accepted') {
+  const cargoOffers: any[] = await kv.getByPrefix(`ovora:cargo-offer:${cargoId}:`);
+  const alreadyAccepted = cargoOffers.some(
+    o => o && o.offerId !== offerId && o.status === 'accepted'
+  );
+  if (alreadyAccepted) {
+    return c.json({ error: 'На этот груз уже принят другой оффер' }, 409);
+  }
+  // Статус груза → matched
+  const cargo: any = await kv.get(`ovora:cargo:${cargoId}`);
+  if (cargo && cargo.status === 'active') {
+    await kv.set(`ovora:cargo:${cargoId}`, {
+      ...cargo, status: 'matched', updatedAt: new Date().toISOString()
+    });
+  }
+}
+```
+
+**Изменения во фронтенде:**
+- `SenderCargoForm.tsx` — после accept показывать статус «matched» (водитель найден)
+- `SenderTripsPage.tsx` — фильтр грузов: `active`, `matched`, `completed`, `cancelled`
+- `SearchResults.tsx` — не показывать грузы со статусом `matched` в поиске
+
+**Статусы груза:** `active` → `matched` → `completed` / `cancelled`.
+- `matched`: водитель найден, груз ждёт загрузки
+- `completed`: POD фото загружено (пока не реализовано — ручной перевод)
+- `cancelled`: отмена отправителем
+
+##### 5. Отмена поездки — каскад офферов
+
+**Проблема:** `DELETE /trips/:id` (`index.ts:1407`) ставит `cancelled`, но
+офферы остаются «accepted» — отправители не уведомлены.
+
+**Решение** — после `kv.set(trip, {status: 'cancelled'})`:
+```ts
+const tripOffers: any[] = await kv.getByPrefix(`ovora:offer:${id}:`);
+for (const offer of tripOffers) {
+  if (!offer || ['cancelled','declined','deleted','rejected'].includes(offer.status)) continue;
+
+  // Возвращаем ёмкость для accepted оферов (хотя поездка уже отменена —
+  // это корректно для целостности данных; ёмкость отменённой поездки никому не нужна,
+  // но invariant «accept = списание, reject = возврат» должен соблюдаться)
+  if (offer.status === 'accepted') {
+    await adjustTripCapacity(id, offer, 1);
+  }
+
+  // Ставим cancelled
+  const updatedOffer = { ...offer, status: 'cancelled', cancelledAt: new Date().toISOString() };
+  await kv.set(`ovora:offer:${id}:${offer.offerId}`, updatedOffer);
+
+  // Очистка индексов
+  if (offer.driverEmail) await kv.del(`ovora:driveroffers:${offer.driverEmail}:${offer.offerId}`).catch(() => {});
+  if (offer.senderEmail) await kv.del(`ovora:senderoffers:${offer.senderEmail}:${offer.offerId}`).catch(() => {});
+
+  // Уведомление отправителю
+  if (offer.senderEmail) {
+    const notifId = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    await kv.set(`ovora:notification:${offer.senderEmail}:${notifId}`, {
+      id: notifId, userEmail: offer.senderEmail,
+      type: 'trip_cancelled', iconName: 'XCircle', iconBg: 'bg-red-500/10 text-red-500',
+      title: 'Поездка отменена',
+      description: `Водитель отменил поездку ${existing.from} → ${existing.to}`,
+      isUnread: true, createdAt: new Date().toISOString(),
+    });
+  }
+}
+```
+
+**Почему restore для cancelled trip:**
+Формально ёмкость отменённой поездки не нужна. Но invariant
+«accepted = списание, не accepted = нет списания» должен соблюдаться
+для целостности данных. Если кто-то потом восстановит поездку из cancelled,
+ёмкость будет корректной.
+
+##### 6. Старые данные — самопочинка при чтении
+
+**Решение:** ничего не делать миграцией. При каждом чтении поездки (`GET /trips`)
+фронтенд уже получает актуальные `availableSeats`/`childSeats`/`cargoCapacity`.
+Если они «разъехались» из-за старых accepted оферов без restore — данные просто
+неточные, но не ломают работу.
+
+**Обоснование:**
+- В базе сейчас 3 поездки, 1 завершена — масштаб проблемы минимальный
+- Разовый пересчёт потребовал бы full scan всех оферов — рискованно
+- Самопочинка при чтении добавляет latency к каждому GET — неоправданно
+- После волны 2 новые офферы будут корректно учтёнными — проблема сама затухнет
+
+##### 7. Формат ответов API
+
+**Не меняем.** Все ответы `PUT /offers`, `PUT /chat/proposal`, `DELETE /trips`,
+`PUT /cargo-offers` остаются в том же формате. Изменения только во внутренней
+логике учёта ёмкости.
+
+##### 8. План проверки (таблица тестов)
+
+| Состояние | Действие | Ожидаемый результат | Касается |
+|---|---|---|---|
+| Trip 3 seats, offer 2 seats → accept | `PUT /offers` accept | `availableSeats = 1` | A |
+| Trip 1 seat, offer 2 seats → accept | `PUT /offers` accept | **409** INSUFFICIENT_CAPACITY | A |
+| Offer was accepted → reject | `PUT /offers` declined | `availableSeats` restored | B |
+| Offer was accepted → cancel (sender) | `PUT /offers` cancelled | `availableSeats` restored | B |
+| Offer pending → reject | `PUT /offers` declined | capacity unchanged | B |
+| Two concurrent accepts | Parallel `PUT /offers` | One succeeds, other gets CONFLICT_RETRY | A |
+| Chat proposal accept | `PUT /chat/proposal` | `availableSeats` reduced | C |
+| Chat proposal reject (was accepted) | `PUT /chat/proposal` | `availableSeats` restored | D |
+| Admin cancel accepted offer | `PUT /admin/offers` | `availableSeats` restored, clamped | E |
+| Cancel trip with accepted offers | `DELETE /trips` | All offers → cancelled, capacity restored | F |
+| Cancel trip with pending offers | `DELETE /trips` | All offers → cancelled, no capacity change | F |
+| Accept cargo-offer when another accepted | `PUT /cargo-offers` | **409** «другой оффер уже принят» | G |
+| Accept cargo-offer (first) | `PUT /cargo-offers` | cargo status → `matched` | G |
+| Accept second cargo-offer | `PUT /cargo-offers` | **409** | G |
+
+##### 9. Порядок выпуска — 5 коммитов
+
+| # | Коммит | Что | Риск |
+|---|---|---|---|
+| 1 | `mimo: W2-adjustTripCapacity` | Функция `adjustTripCapacity` + retry wrapper | Изолированно, ни один вызов не затронут |
+| 2 | `mimo: W2-offer-page-path` | Точки A+B: замена инлайнового кода в `PUT /offers` на `adjustTripCapacity` | Проверить фронт: `DriverTripsPage`, `TripDetail` |
+| 3 | `mimo: W2-chat-path` | Точки C+D: замена в `PUT /chat/proposal` + точка E (admin) | Проверить фронт: `ChatPage`, `ProposalCard` |
+| 4 | `mimo: W2-trip-cancel-cascade` | Точка F: каскад отмены офферов при отмене поездки | Проверить фронт: `DriverTripsPage` кнопка отмены |
+| 5 | `mimo: W2-cargo-single-accept` | Точка G: правило «только один accept» + статус `matched` | Проверить фронт: `SenderTripsPage`, `SearchResults` |
+
+Каждый коммит проходит: `typecheck` ✅ `lint` ✅ `test` ✅ `build` ✅
+
 #### Проверка Claude: аудит UX-1…UX-12 — 2026-09-14
 
 Проверены по коду находки уровня CRITICAL и HIGH и ещё три. Остальные (UX-5, UX-8,
