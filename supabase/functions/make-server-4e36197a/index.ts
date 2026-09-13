@@ -2006,7 +2006,7 @@ app.put("/make-server-4e36197a/offers/:tripId/:offerId", async (c) => {
     // ✅ FIX #2: Уведомление отправителю при accept/reject
     try {
       const newStatus = updated.status;
-      if ((newStatus === 'accepted' || newStatus === 'rejected') && existing.senderEmail) {
+      if ((newStatus === 'accepted' || newStatus === 'rejected' || newStatus === 'declined') && existing.senderEmail) {
         const trip: any = await kv.get(`ovora:trip:${tripId}`);
         const tripRoute = trip ? `${trip.from} → ${trip.to}` : 'поездку';
         const driverName = existing.driverName || trip?.driverName || 'Водитель';
