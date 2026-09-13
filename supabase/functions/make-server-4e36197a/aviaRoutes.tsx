@@ -185,6 +185,12 @@ export function setupAviaRoutes(app: Hono, deps: AviaDeps): void {
       if (!phone || !pin) return c.json({ error: 'phone and pin required' }, 400);
 
       const clean   = aviaClean(phone);
+
+      const blEntry = await Blacklist.check(clean);
+      if (blEntry) {
+        return c.json({ error: 'Доступ ограничен', blacklisted: true }, 403);
+      }
+
       const pinData = await Pins.get(clean);
 
       if (!pinData?.pinHash) return c.json({ error: 'Аккаунт не найден. Зарегистрируйтесь.' }, 404);
