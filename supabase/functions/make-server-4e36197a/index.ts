@@ -1,4 +1,4 @@
-﻿import { Hono } from "npm:hono";
+import { Hono } from "npm:hono";
 import { setupAviaRoutes } from "./aviaRoutes.tsx";
 import { signUserToken, verifiedEmailFromToken, userAuthEnabled } from "./userAuth.tsx";
 import { cors } from "npm:hono/cors";
@@ -4257,10 +4257,16 @@ async function autoVerifyDocument(
   userEmail: string,
   extractedFullName: string | null
 ): Promise<{ 
-  status: 'verified' | 'rejected'; 
+  status: 'verified' | 'rejected' | 'pending'; 
   rejectionReason?: string;
   needsProfileUpdate?: boolean;
 }> {
+  // Тип не распознан или имя не извлечено → на ручную проверку админу
+  if (documentType === 'unknown' || !extractedFullName) {
+    console.log(`[autoVerify] Document sent to manual review: type=${documentType}, name=${extractedFullName || 'null'}`);
+    return { status: 'pending' };
+  }
+
   const today = new Date();
   
   // ✅ 1. ОСНОВНАЯ ПРОВЕРКА: Срок действия документа (просрочен или нет)
