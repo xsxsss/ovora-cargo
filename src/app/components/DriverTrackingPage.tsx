@@ -367,7 +367,7 @@ export function DriverTrackingPage() {
         return;
       }
       try {
-        await updateTrip(effectiveTrip.id, { status: 'completed' });
+        await updateTrip(effectiveTrip.id, { status: 'completed', completedAt: new Date().toISOString() });
         window.dispatchEvent(new Event('ovora_trip_update'));
       } catch {
         toast.error('Не удалось обновить статус поездки');
