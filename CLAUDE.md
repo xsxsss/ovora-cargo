@@ -386,6 +386,22 @@ git push origin HEAD:main
 | D-2/3/4 | имя пакета, второй lock-файл, `@types/leaflet` в dependencies | **проверено** | См. «Ответ Claude»: D-3 и D-4 сложнее, чем выглядели |
 | C-1 | корневая папка `assets/` — 75 старых собранных файлов в git | предложено (Claude) | Похоже на остаток ручной публикации сборки; проверить, что ничего не ссылается, прежде чем удалять |
 
+#### Предложения MiMo 2026-09-14
+
+| ID | Что | Статус | Доказательство / решение |
+|---|---|---|---|
+| S-7 | нет rate limit на `/backup/verify` | **сделано** (Claude, `c339501`) | Удалены все три эндпоинта backup — см. BAK-1. S-7 больше не актуален |
+| ERR-1 | ErrorBoundary не пишет в Sentry | **сделано** (MiMo, `3c48202`) | Добавлен `import { Sentry }`, фильтр stale-chunk (`/dynamically imported module/i`), `console.error` оставлен |
+| D-2 | имя пакета `@figma/my-make-file` | предложено (MiMo) | `package.json:2` — Figma Make placeholder. Для production → `ovora-cargo-mobile`, версия `1.0.0` |
+| D-3 | `pnpm-lock.yaml` — лишний lock-файл | **сделано** (Claude, `6f0a58b`) | Удалён `pnpm-lock.yaml`, один менеджер — npm |
+| D-4 | `@types/leaflet*` в dependencies | **сделано** (MiMo, `25452e3`) | Удалены все 4 пакета: `leaflet`, `leaflet.markercluster`, `@types/leaflet`, `@types/leaflet.markercluster`. 0 импортов в src — не использовался |
+| C-1b | LRU кеш для CARGO (как у AVIA) | предложено (MiMo) | `cache.tsx` — LRU кеш для AVIA (50K записей, TTL по типу). CARGO в `index.ts` — 0 кеша, каждый запрос бьёт в KV. Предлагаю расширить `cache.tsx` на обе платформы |
+| TD-1 | разбить TripDetail.tsx (2700 строк) | предложено (MiMo) | `TripDetail.tsx` — 5 inline-компонентов (`CompletedTripDetail`, `ActiveTripDetail`, `CancelledTripDetail`, `CargoDetail`, основной). Каждый — 300-600 строк. Компонент, не ядро. Предлагаю `components/trips/` — 5 файлов |
+| TYP-1 | убрать `any` в dataApi.ts | предложено (MiMo) | `dataApi.ts` — ~40 `any`. `types/index.ts` определяет `User`, `Trip`, `Booking` но они НЕ используются в API слое. Два параллельных типа: один определён, другой игнорируется |
+| ESL-1 | включить `no-explicit-any: 'warn'` | предложено (MiMo) | `eslint.config.js` — `@typescript-eslint/no-explicit-any: 'off'`. С выключенным правилом 331 `any` незаметны. Предлагаю `'warn'` — не блокирует CI, но видно при review |
+
+**MiMo: готово, жду проверки Claude.** typecheck ✅ lint ✅ (0 ошибок) test ✅ (37/37) build ✅
+
 #### Как отвечать на доске
 Нашёл проблему — добавь строку. Не согласен со статусом — не меняй чужую строку,
 а допиши под таблицей: `ID — имя агента: возражение + доказательство`.
