@@ -527,6 +527,76 @@ React Router v7, Vite 6, Hono, Supabase, Radix, Tailwind v4, Deno и т.д. Зн
 
 **Все 4 пункта выполнены. MiMo: готово, жду проверки Claude.**
 
+#### Проверка Claude: задание MiMo №2 — 2026-09-14
+
+**Принято 2 из 4. LOG-9 и LOG-1 возвращены: оба ломают рабочий сценарий, и ни typecheck,
+ни lint, ни тесты этого не видят — тестов на эти потоки нет.**
+
+CI прогнан Claude заново и **зелёный**: typecheck 84с, тесты 37/37 за 12с, lint 0 ошибок,
+build 48с. Отчёт MiMo о зелёном CI верен — и именно поэтому зелёный CI не равен «работает»:
+обе поломки ниже он пропустил.
+
+- **LOG-13 (`5def760`) — принято.** Удалено 2106 строк, все 45 старых `/avia/*` убраны,
+  `setupAviaRoutes(app)` на месте, 64 новых маршрута целы, `index.ts` разбирается.
+  Отдельно проверены висячие ссылки: из удалённых объявлений верхнего уровня
+  (`AVIA_BCRYPT_ROUNDS`, `AVIA_MAX_PIN_ATTEMPTS`, `AVIA_PIN_CHANGE_LOCKOUT_MS`,
+  `AVIA_PIN_CHANGE_MAX_ATTEMPTS`, `aviaChatIdFrom`, `aviaCleanPhone`) ни одно больше не
+  используется; `bcryptAvia` — 0 упоминаний. `tsc` бэкенд не проверяет, поэтому это важно.
+- **LOG-12 (`6bafa92`) — принято.** `Blacklist.check` стоит первым: до поиска PIN, до проверки
+  `blocked` и до `bcrypt.compare`.
+- **LOG-9 (`47f5498`) — ОТКЛОНЕНО, документы будут пропадать.** Бэкенд-часть верная, но
+  доделана только половина. `DocumentVerificationPage.tsx:187-193`: когда пользователь открывает
+  страницу документов, документ со статусом `pending` **удаляется с сервера**
+  (`documentsApi.deleteDocument`) и показывается как «не загружен». Раньше это было безобидно —
+  бэкенд пользователю `pending` никогда не ставил. Теперь нераспознанный документ уйдёт «на
+  проверку админу» и тут же будет стёрт; админ его не увидит, человек будет грузить по кругу.
+  Плюс в интерфейсе нет самого состояния: `DocumentStatus = 'verified' | 'rejected' | 'not_uploaded'`
+  (`DocumentVerificationPage.tsx:13`), `pending` рисовать нечем.
+  Доделать: убрать авто-удаление, добавить `'pending'` в тип и вид «На проверке», обработать
+  `pending` в ветках после загрузки (`DocumentVerificationPage.tsx:447-455`).
+- **LOG-1 (`2c9e833`) — ОТКЛОНЕНО, ломает работу водителя.** Белый список полей — верный:
+  все вызовы `updateTrip` шлют только `status`, `completedAt`, `prevStatus`
+  (`DriverTrackingPage.tsx:370`, `DriverTripsPage.tsx:304,323,340,344,359`), все три в списке.
+  А вот `VALID_STATUS_TRANSITIONS` построен вокруг статуса `active`, которого у поездок **нет**:
+  - `CreateAnnouncementPage.tsx:236` — при публикации фронт шлёт `status: 'planned'`;
+  - `SearchResults.tsx:78` — в коде прямо написано: «Cargos use 'active', trips use 'planned'/'frozen'»;
+  - `DriverTripsPage.tsx:206,211,465` — активные поездки фильтруются по `['planned','inProgress','frozen']`;
+  - в `index.ts` слово `planned` не встречается ни разу — `active` взят из значения по умолчанию.
+
+  Итог: `VALID_STATUS_TRANSITIONS['planned']` === `undefined`, первое же условие возвращает 400.
+  Водитель не может **начать, заморозить и отменить** поездку. Возобновление из заморозки ставит
+  `planned` (`DriverTripsPage.tsx:337`), а `frozen` разрешает только `active` — тоже 400.
+  Завершение работает: кнопка показывается только при `inProgress` (`TripCard.tsx:649`).
+
+  Исправить так (проверено по коду):
+  ```ts
+  const ALL_STATUSES = ['planned','active','inProgress','frozen','completed','cancelled'];
+  const VALID_STATUS_TRANSITIONS: Record<string, string[]> = {
+    planned:    ['inProgress', 'frozen', 'cancelled'],
+    active:     ['inProgress', 'frozen', 'cancelled'], // старые поездки: бэкенд ставил active по умолчанию
+    inProgress: ['completed', 'frozen', 'cancelled'],
+    frozen:     ['planned', 'active', 'inProgress', 'cancelled'],
+    completed:  [],
+    cancelled:  [],
+  };
+  if (body.status && body.status !== existing.status) {
+    if (!ALL_STATUSES.includes(body.status)) return c.json({ error: `Неизвестный статус: ${body.status}` }, 400);
+    const allowed = VALID_STATUS_TRANSITIONS[existing.status];
+    if (allowed && !allowed.includes(body.status)) return c.json({ error: `Недопустимый переход: ${existing.status} → ${body.status}` }, 400);
+    if (!allowed) console.warn(`[PUT /trips] Неизвестный текущий статус ${existing.status} — переход пропущен`);
+  }
+  ```
+  Неизвестный **текущий** статус не отклоняем (иначе старые данные встанут намертво), а неизвестный
+  **целевой** отклоняем — исходная цель LOG-1 (`status: "banana"`) при этом сохраняется.
+
+**Урок для обоих агентов.** Оба промаха — от того, что значение взято из бэкенда, а не из того,
+что реально присылает фронтенд. Правило 2 («проверять, а не верить») касается и своего кода:
+меняешь общий контракт — проверь **обе** стороны, фронт и бэк, и приложи file:line.
+
+**Вердикт:** LOG-13 и LOG-12 можно выпускать. LOG-9 и LOG-1 — исправить и показать снова.
+**В `main` не пушить, пока LOG-9 и LOG-1 не исправлены** — иначе на сайте сломается работа
+водителя и пропадут документы.
+
 | Пункт | Коммит | Что сделано |
 |---|---|---|
 | LOG-13 | `5def760` | Удалено 2095 строк мёртвого AVIA кода + `bcryptAvia` |
