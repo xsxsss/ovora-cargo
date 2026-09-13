@@ -10,7 +10,7 @@ import { projectId, publicAnonKey } from '../../../utils/supabase/info';
 import { syncUserNameInChats, syncUserNameInTrips } from '../api/userApi';
 import { CSRF_HEADER, CSRF_TOKEN } from '../api/csrfToken';
 
-type DocumentStatus = 'verified' | 'rejected' | 'not_uploaded';
+type DocumentStatus = 'verified' | 'rejected' | 'not_uploaded' | 'pending';
 type ScanIssue = 'expired' | 'expiring_soon' | 'poor_quality' | 'low_resolution' | null;
 type ScanPhase = 'idle' | 'scanning' | 'done';
 
@@ -184,14 +184,6 @@ export function DocumentVerificationPage() {
       const mergedDocs: DocItem[] = templates.map(template => {
         const dbDoc = dbDocs.find(d => d.id === template.id);
         if (dbDoc) {
-          if ((dbDoc.status as string) === 'pending') {
-            documentsApi.deleteDocument(dbDoc.id, dbDoc.userEmail).catch(() => {});
-            return {
-              id: template.id, type: template.type, title: template.title,
-              subtitle: template.subtitle, status: 'not_uploaded' as DocumentStatus,
-              hasPhoto: false, photoQualityScore: 0,
-            };
-          }
           return {
             id: dbDoc.id, type: dbDoc.type, title: dbDoc.title, subtitle: dbDoc.subtitle,
             status: dbDoc.status as DocumentStatus,
@@ -494,6 +486,12 @@ export function DocumentVerificationPage() {
       badge: isDark ? 'bg-red-500/15 text-red-400' : 'bg-red-50 text-red-700',
       icon: <XCircle className="w-3.5 h-3.5" />,
       iconColor: isDark ? 'text-red-400' : 'text-red-600',
+    },
+    pending: {
+      label: 'На проверке',
+      badge: isDark ? 'bg-amber-500/15 text-amber-400' : 'bg-amber-50 text-amber-700',
+      icon: <AlertCircle className="w-3.5 h-3.5" />,
+      iconColor: isDark ? 'text-amber-400' : 'text-amber-600',
     },
     not_uploaded: {
       label: 'Не загружено',
@@ -882,7 +880,7 @@ export function DocumentVerificationPage() {
                 const issue = issues[doc.id] ?? null;
                 const isScanning = scanningIndex === doc.id;
                 const dl = doc.expiryDate ? daysLeft(doc.expiryDate) : null;
-                const sc = { verified: { bar: '#10b981', bg: '#10b98112', border: '#10b98120' }, rejected: { bar: '#ef4444', bg: '#ef444412', border: '#ef444420' }, not_uploaded: { bar: '#2693ff', bg: '#2693ff08', border: '#2693ff15' } }[doc.status] || { bar: '#2693ff', bg: '#2693ff08', border: '#2693ff15' };
+                const sc = ({ verified: { bar: '#10b981', bg: '#10b98112', border: '#10b98120' }, rejected: { bar: '#ef4444', bg: '#ef444412', border: '#ef444420' }, pending: { bar: '#f59e0b', bg: '#f59e0b12', border: '#f59e0b20' }, not_uploaded: { bar: '#2693ff', bg: '#2693ff08', border: '#2693ff15' } } as Record<string, { bar: string; bg: string; border: string }>)[doc.status] || { bar: '#2693ff', bg: '#2693ff08', border: '#2693ff15' };
                 return (
                   <div key={doc.id} className="rounded-3xl overflow-hidden relative"
                     style={{ background: 'linear-gradient(145deg,#0d1929,#111827)', borderWidth: 1, borderStyle: 'solid', borderColor: issue ? '#f9731630' : sc.border }}>
