@@ -485,6 +485,26 @@ React Router v7, Vite 6, Hono, Supabase, Radix, Tailwind v4, Deno и т.д. Зн
 | Undo-reject | 5 минут на отмену отказа | Нет undo |
 | Напоминания | Авто через 24ч | Нет напоминаний |
 
+#### Аудит UX-потоков логистики — MiMo 2026-09-14
+
+Анализ пользовательских сценариев: водитель, отправитель, грузы, чаты, трекинг.
+Проверено по реальному коду фронтенда file:line.
+
+| ID | Что | Серьёзность | Доказательство |
+|---|---|---|---|
+| UX-1 | Бронирования отправителя невидимы когда trip `planned` — фильтр `SenderTripsPage:280` не включает `planned` | **CRITICAL** | `SenderTripsPage.tsx:280` — `active || inProgress || frozen`. Фронтенд создаёт trips с `planned` (`CreateAnnouncementPage.tsx:236`). Отправитель: оффер принят → бронирования пустые → до старта водителя |
+| UX-2 | Trip офферы отклоняются `declined`, cargo офферы `rejected` — разные статусы для одного действия | **CRITICAL** | `DriverTripsPage.tsx:440` — `declined`. `TripDetail.tsx:2215` — `rejected`. Фильтрация в `SenderTripsPage:215` ищет `accepted` — оба отклонённых пропадают, но по-разному |
+| UX-3 | Отклонённый оффер исчезает без уведомления — toast только на странице TripDetail | **HIGH** | `TripDetail.tsx:549-555` — toast при polling. `SenderTripsPage.tsx:215` — фильтр только `accepted`. Ушёл со страницы → потерял след |
+| UX-4 | DriverTrackingPage completion не шлёт `completedAt` — другой формат чем DriverTripsPage | **HIGH** | `DriverTrackingPage.tsx:370` — `{ status: 'completed' }`. `DriverTripsPage.tsx:323` — `{ status: 'completed', completedAt }`. Два пути → разные данные |
+| UX-5 | Нет трекинга пока trip не `inProgress` — отправитель не видит водителя до старта | **MEDIUM** | `TripCard.tsx:681-691` — кнопка «Смотреть трекинг» только при `inProgress`. Между accept и start — «Ожидание отправления», без ETA |
+| UX-6 | Frozen restore edge case — `prevStatus: 'active'` не совпадает с проверкой | **MEDIUM** | `DriverTripsPage.tsx:337` — `prevStatus === 'inProgress' ? 'inProgress' : 'planned'`. Старые поездки с `active` → всегда `planned` |
+| UX-7 | Цена офера не валидируется на сервере — клиент ставит любую | **MEDIUM** | `TripDetail.tsx:630-633` — `totalPrice` считается на клиенте. `index.ts` принимает как есть. Дубль LOG-8 |
+| UX-8 | Gap между accept и inProgress — отправитель не понимает что происходит | **MEDIUM** | `TripCard.tsx:683-689` — «Принята · Ожидание отправления». Нет ETA, нет countdown, нет контакта водителя до inProgress |
+| UX-9 | Duplicate review detection через localStorage — смена устройства → дубль | **LOW** | `TripDetail.tsx:273-277` — `ovora_reviewed_trips` в localStorage. Сервер ловит `DUPLICATE_REVIEW`, но UX показывает форму |
+| UX-10 | Declined offers исчезают через 48ч без архива | **LOW** | `DriverTripsPage.tsx:79-86` — 48h window, потом молчаливое удаление |
+| UX-11 | Cargo статус никогда не меняется после accept оффера | **LOW** | `SenderCargoForm.tsx:111` — `status: 'active'`. Нет UI для `completed`/`in_transit`. Дубль LOG-4 |
+| UX-12 | SenderTrackingPage fallback — демо-данные вместо пустого экрана | **LOW** | `SenderTrackingPage.tsx:171` — `'Электроника'`, `'850'`, `'7 504 TJS'` когда `activeTrip === null` |
+
 #### Проверка Claude: аудит LOG-1…LOG-15 — 2026-09-14
 
 Каждая находка проверена по коду. Номера строк — на коммит `50ac52d`. Исправление статусов в
