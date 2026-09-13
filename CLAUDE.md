@@ -729,6 +729,28 @@ if (existing.status === 'accepted') {
 
 **Точка G** — отдельная логика (см. раздел 4).
 
+**Порядок операций при accept (точки A, C, G):**
+Списание ёмкости/переход груза должно идти **ДО** записи оффера как принятого.
+Если сначала записать оффер, а потом списание не пройдёт (`insufficient`/`conflict`),
+оффер уже висит принятым без резервирования мест. Порядок:
+
+```
+1. adjustTripCapacity(tripId, offer, -1)  →  'ok'?
+2. если 'insufficient' → 409, оффер не пишем
+3. если 'conflict' → retry (до 3 раз), потом 503
+4. если 'ok' → kv.set(offer, {status: 'accepted'})
+```
+
+Для грузов (точка G): `setIfUnchanged(cargo, active→matched)` → если `true`,
+записываем оффер → если запись оффера упала — компенсация `matched → active`.
+
+**Обработка ошибок при возврате (точки B, D, E, F):**
+Возврат `+1` происходит после того, как отказ уже состоялся — вернуть
+пользователю ошибку нельзя. При `conflict` от `adjustTripCapacity(..., 1)`:
+- Увеличить до 5 попыток (возврат критичнее списания — ёмкость «повиснет»)
+- Если все 5 не прошли — `console.error` с `tripId` + `offerId` + `offer.status`
+  для ручного разбора. Не молчать: незафиксированный возврат = разъехавшийся учёт.
+
 ##### 3. Защита от гонки
 
 KV — это таблица Postgres, поэтому атомарная проверка-и-запись возможна
@@ -763,6 +785,9 @@ A читает (3 места), B читает (3 места), A записыва
 **Учти:** у старых записей `updatedAt` может не быть. `setIfUnchanged`
 предусматривает `null` (ветка `is`). Проверь на реальных данных перед
 использованием.
+
+**Ограничение:** `setIfUnchanged` построен на `update()`, а не `upsert()` —
+он не создаёт запись, если ключа нет. Для создания новых записей по-прежнему `kv.set`.
 
 ##### 4. Грузы (Cargo) — правило «только один accept»
 
@@ -813,6 +838,29 @@ if (updated.status === 'accepted' && existing.status !== 'accepted') {
 - `matched`: водитель найден, груз ждёт загрузки
 - `completed`: POD фото загружено (пока не реализовано — ручной перевод)
 - `cancelled`: отмена отправителем
+
+**Обратный путь `matched → active`:**
+Если оффер на груз отменён (`cancelled`/`declined`/`rejected`), груз возвращается
+в `active` — через `setIfUnchanged`, ради симметрии. Точка вызова — `PUT /cargo-offers`
+(`index.ts:2218`), рядом с очисткой индексов:
+```ts
+if (['cancelled','declined','deleted','rejected'].includes(updated.status) && existing.status === 'accepted') {
+  const cargo: any = await kv.get(`ovora:cargo:${cargoId}`);
+  if (cargo && cargo.status === 'matched') {
+    await setIfUnchanged(
+      `ovora:cargo:${cargoId}`,
+      cargo.updatedAt || null,
+      { ...cargo, status: 'active', updatedAt: new Date().toISOString() }
+    );
+  }
+}
+```
+
+**Компенсация при неудачной записи оффера:**
+Если `setIfUnchanged` для груза прошёл (`matched`), но запись самого оффера
+не удалась (KV ошибка) — груз застрянет в `matched` без принятого оффера.
+В таком случае — `try/catch` вокруг записи оффера, в `catch` — вернуть
+груз в `active` тем же `setIfUnchanged`.
 
 ##### 5. Отмена поездки — каскад офферов
 
