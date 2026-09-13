@@ -109,6 +109,19 @@ button, a {
   height: clamp(180px, 30vw, 480px);
 }
 
+/* ── Мобильный оверлей лого+заголовка на фото (см. Welcome.tsx) ──
+   Верхний левый угол — там на фото тёмное небо/город, грузовик и машина
+   занимают правую/нижнюю часть кадра и не перекрываются. Без сплошного
+   скрима — фото само по себе тёмное, читаемость держит text-shadow на
+   каждом текстовом элементе (см. Welcome.tsx). */
+.ovora-hero-overlay-brand {
+  position: absolute;
+  top: 0; left: 0;
+  max-width: 62%;
+  padding: 10px clamp(10px,4vw,16px) 16px 10px;
+  z-index: 3;
+}
+
 /* ════════════════════════════════════════════════════
    DESKTOP (700px+): hero = full screen background,
    2-column grid: lang (top-left) | cards (top-right)
@@ -189,6 +202,14 @@ button, a {
 
   /* Hide logo row from brand — logo lives in navbar */
   .ovora-brand-logo-row { display: none !important; }
+  /* Оверлей поверх фото — мобильный приём, на десктопе текст и так живёт
+     рядом с фото в .ovora-area-brand без риска перекрыть машину/грузовик. */
+  .ovora-hero-overlay-brand { display: none !important; }
+  /* Заголовок "Платформа Ovora" скрыт в мобильной базе (дублируется оверлеем
+     на фото) — на десктопе оверлея нет, показываем как раньше. Двойной класс
+     поднимает специфичность выше мобильного правила (иначе позже в файле
+     unconditional !important побеждает независимо от media query). */
+  .ovora-area-brand.ovora-area-brand .ovora-brand-heading { display: block !important; }
 
   /* Show stats strip on desktop */
   .ovora-brand-stats { display: flex !important; }
@@ -329,6 +350,10 @@ button, a {
 /* ── Mobile area defaults ── */
 .ovora-navbar       { display: none; }
 .ovora-brand-stats  { display: none; }
+/* ✅ Лого + заголовок + описание + статистика теперь полностью дублируются
+   оверлеем на самом фото (.ovora-hero-overlay-brand, см. Welcome.tsx) —
+   весь .ovora-area-brand на мобиле снова скрыт целиком (десктоп не
+   затронут, там свой !important-override ниже в файле). */
 .ovora-area-brand   { display: none; }
 .ovora-area-cards   { order: 1; }
 .ovora-area-lang    { order: 2; }

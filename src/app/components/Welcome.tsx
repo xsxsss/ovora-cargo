@@ -45,7 +45,7 @@ function MapBackground() {
     <div style={{ position: 'absolute', inset: 0, zIndex: 0, overflow: 'hidden' }}>
       <div style={{
         position: 'absolute', inset: 0,
-        backgroundImage: 'radial-gradient(rgba(91,163,245,0.12) 1px, transparent 1px)',
+        backgroundImage: 'transparent',
         backgroundSize: '18px 18px',
         maskImage: 'radial-gradient(ellipse 80% 60% at 50% 30%, #000 30%, transparent 75%)',
         WebkitMaskImage: 'radial-gradient(ellipse 80% 60% at 50% 30%, #000 30%, transparent 75%)',
@@ -53,7 +53,7 @@ function MapBackground() {
       <div style={{
         position: 'absolute', top: '-10%', left: '50%', transform: 'translateX(-50%)',
         width: 520, height: 520, borderRadius: '50%',
-        background: 'radial-gradient(circle, rgba(33,118,232,0.35) 0%, transparent 60%)',
+        background: 'transparent',
         filter: 'blur(20px)',
       }} />
       <svg style={{ position: 'absolute', inset: 0, width: '100%', height: '100%' }} viewBox="0 0 460 920" preserveAspectRatio="none">
@@ -214,9 +214,9 @@ export function Welcome() {
   if (!mounted) return null;
 
   const _statsStrip = [
-    { target: liveStats?.drivers  ?? 3400, suffix: liveStats ? '' : '+', label: 'Водителей', color: C.blueLight },
-    { target: liveStats?.cities   ?? 12,   suffix: '',                    label: 'Городов',   color: C.purple },
-    { target: liveStats?.satisfied ?? 98,  suffix: '%',                   label: 'Довольных', color: C.green },
+    { target: liveStats?.drivers  ?? 3400, suffix: liveStats ? '' : '+', label: t('wl_stat_drivers'),   color: C.blueLight },
+    { target: liveStats?.cities   ?? 12,   suffix: '',                    label: t('wl_stat_cities'),    color: C.purple },
+    { target: liveStats?.satisfied ?? 98,  suffix: '%',                   label: t('wl_stat_satisfied'), color: C.green },
   ];
 
   const _bottomStats: { icon: string; val: number; suffix: string; label: string; color: string }[] = [
@@ -282,6 +282,43 @@ export function Welcome() {
           <source media="(min-width: 700px)" srcSet={`${import.meta.env.BASE_URL}icons/hero-desktop.png`} />
           <img src={siteConfig.icons.hero} alt="Ovora Cargo" />
         </picture>
+
+        {/* ── Мобильный оверлей: лого + заголовок поверх фото, в верхнем левом
+            углу — там на фото тёмное небо/город, а не грузовик/машина. Только
+            мобиль (.ovora-hero-overlay-brand скрыт на десктопе через CSS —
+            там текст уже живёт в .ovora-area-brand рядом с фото). ── */}
+        <div className="ovora-hero-overlay-brand" style={{ textShadow: '0 1px 4px rgba(0,0,0,0.85), 0 1px 12px rgba(0,0,0,0.6)' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <div style={{ transform: 'scale(0.64)', transformOrigin: 'left center', marginRight: -14 }}>
+              <Logo />
+            </div>
+            <div>
+              <div style={{ fontSize: 13, fontWeight: 900, color: '#fff', letterSpacing: '-0.2px', lineHeight: 1.1 }}>
+                Ovora <span style={{ color: C.blueLight }}>Cargo</span>
+              </div>
+              <div style={{ fontSize: 7, fontWeight: 700, color: C.dim2, letterSpacing: '0.09em', textTransform: 'uppercase', marginTop: 1 }}>
+                Logistics & Air Cargo
+              </div>
+            </div>
+          </div>
+          <div style={{ marginTop: 8 }}>
+            <div style={{ fontSize: 17, fontWeight: 900, color: '#fff', lineHeight: 1.08, letterSpacing: '-0.5px' }}>{t('wl_brand_platform')}</div>
+            <div style={{ fontSize: 17, fontWeight: 900, color: C.blueLight, lineHeight: 1.08, letterSpacing: '-0.5px' }}>Ovora</div>
+          </div>
+          <div style={{ display: 'flex', gap: 14, marginTop: 8 }}>
+            {_statsStrip.map((s, i) => (
+              <div key={i} style={{ minWidth: 0 }}>
+                <div style={{ fontSize: 15, fontWeight: 900, color: s.color, lineHeight: 1, letterSpacing: '-0.3px' }}>
+                  {s.target.toLocaleString()}{s.suffix}
+                </div>
+                <div style={{ fontSize: 7, color: C.dim, marginTop: 2, fontWeight: 600 }}>{s.label}</div>
+              </div>
+            ))}
+          </div>
+          <p style={{ fontSize: 9.5, color: C.dim, lineHeight: 1.4, margin: '8px 0 0', maxWidth: 190 }}>
+            {t('wl_tagline')}
+          </p>
+        </div>
       </motion.div>
 
       {/* ── Desktop Navbar (скрыт на мобайле через CSS) ── */}
@@ -314,7 +351,7 @@ export function Welcome() {
                 fontSize: 13, fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit',
                 transition: 'all 0.18s ease', position: 'relative', overflow: 'hidden',
               }}>
-                {active && <span style={{ position: 'absolute', inset: 0, background: 'radial-gradient(ellipse at top, rgba(91,163,245,0.18), transparent 70%)' }} />}
+                {active && <span style={{ position: 'absolute', inset: 0, background: 'transparent' }} />}
                 <span style={{ fontSize: 15, position: 'relative' }}>{l.flag}</span>
                 <span style={{ position: 'relative' }}>{l.display}</span>
               </button>
@@ -352,7 +389,7 @@ export function Welcome() {
                     cursor: 'pointer', fontFamily: 'inherit', position: 'relative', overflow: 'hidden',
                     transition: 'all 0.18s ease',
                   }}>
-                    {active && <span style={{ position: 'absolute', inset: 0, background: 'radial-gradient(ellipse at top, rgba(91,163,245,0.22), transparent 70%)' }} />}
+                    {active && <span style={{ position: 'absolute', inset: 0, background: 'transparent' }} />}
                     <span style={{ fontSize: 'clamp(14px,4vw,17px)', position: 'relative' }}>{l.flag}</span>
                     <span style={{ position: 'relative' }}>{l.display}</span>
                   </button>
@@ -362,19 +399,39 @@ export function Welcome() {
           </div>
         </motion.div>
 
-        {/* ╔╗ AREA: BRAND (только десктоп — лого + заголовок + текст) ╔╗ */}
+        {/* ╔╗ AREA: BRAND — лого + заголовок + текст. Раньше был desktop-only,
+            на мобиле его место занимала статичная картинка hero-promo с зашитым
+            русским текстом (не переводилась на TJ/EN). Теперь живой, переводимый
+            блок виден и на мобиле (см. .ovora-area-brand в index.css). ╔╗ */}
         <motion.div className="ovora-area-brand"
           initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.2, duration: 0.45 }}
         >
-          {/* Заголовок + разделитель + описание */}
-          <div>
+          {/* Лого-строка — первой, на мобиле это единственное место с вордмарком
+              (navbar с лого скрыт на мобиле) */}
+          <div className="ovora-brand-logo-row" style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+            <Logo />
+            <div>
+              <div style={{ fontSize: 'clamp(18px,2vw,24px)', fontWeight: 900, color: '#fff', letterSpacing: '-0.3px', lineHeight: 1.1 }}>
+                Ovora <span style={{ color: C.blueLight }}>Cargo</span>
+              </div>
+              <div style={{ fontSize: 'clamp(8px,0.9vw,10px)', fontWeight: 700, color: C.dim2, letterSpacing: '0.1em', textTransform: 'uppercase', marginTop: 2 }}>
+                Logistics & Air Cargo
+              </div>
+            </div>
+          </div>
+
+          {/* Заголовок + разделитель — на мобиле дублируется оверлеем на фото
+              (.ovora-hero-overlay-brand), поэтому здесь скрыт через CSS, чтобы
+              не показывать дважды. Описание ниже (без класса) остаётся видимым
+              и на мобиле, и на десктопе. */}
+          <div className="ovora-brand-heading">
             <div style={{ fontSize: 'clamp(28px,3.2vw,48px)', fontWeight: 900, color: '#fff', lineHeight: 1.06, letterSpacing: '-1.5px' }}>{t('wl_brand_platform')}</div>
             <div style={{ fontSize: 'clamp(28px,3.2vw,48px)', fontWeight: 900, color: C.blueLight, lineHeight: 1.06, letterSpacing: '-1.5px' }}>Ovora</div>
             <div style={{ width: 38, height: 2.5, background: C.blue, borderRadius: 2, margin: 'clamp(7px,1.2vh,12px) 0' }} />
-            <p style={{ fontSize: 'clamp(11px,1.2vw,14px)', color: C.dim, lineHeight: 1.6, margin: 0, maxWidth: 300 }}>
-              {t('wl_tagline')}
-            </p>
           </div>
+          <p style={{ fontSize: 'clamp(11px,1.2vw,14px)', color: C.dim, lineHeight: 1.6, margin: 0, maxWidth: 300 }}>
+            {t('wl_tagline')}
+          </p>
 
           {/* Stats strip — только на десктопе */}
           <div className="ovora-brand-stats" style={{ display: 'flex', gap: 'clamp(20px,3vw,40px)' }}>
@@ -386,19 +443,6 @@ export function Welcome() {
                 <div style={{ fontSize: 'clamp(9px,0.9vw,11px)', color: C.dim, marginTop: 4, fontWeight: 600 }}>{s.label}</div>
               </div>
             ))}
-          </div>
-
-          {/* Лого-строка */}
-          <div className="ovora-brand-logo-row" style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-            <Logo />
-            <div>
-              <div style={{ fontSize: 'clamp(18px,2vw,24px)', fontWeight: 900, color: '#fff', letterSpacing: '-0.3px', lineHeight: 1.1 }}>
-                Ovora <span style={{ color: C.blueLight }}>Cargo</span>
-              </div>
-              <div style={{ fontSize: 'clamp(8px,0.9vw,10px)', fontWeight: 700, color: C.dim2, letterSpacing: '0.1em', textTransform: 'uppercase', marginTop: 2 }}>
-                Logistics & Air Cargo
-              </div>
-            </div>
           </div>
         </motion.div>
 

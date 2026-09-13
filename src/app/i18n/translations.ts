@@ -15,6 +15,9 @@ export const translations = {
 
     // Welcome (новый дизайн)
     wl_lang_label: 'Язык интерфейса',
+    wl_stat_drivers: 'Водителей',
+    wl_stat_cities: 'Городов',
+    wl_stat_satisfied: 'Довольных',
     wl_brand_platform: 'Платформа',
     wl_tagline: 'Грузоперевозки и авиадоставка между Россией, Таджикистаном и СНГ.',
     wl_avia_desc: 'Авиагруз  Россия ↔ Таджикистан',
@@ -214,6 +217,9 @@ export const translations = {
 
     // Welcome (дизайни нав)
     wl_lang_label: 'Забони интерфейс',
+    wl_stat_drivers: 'Ронандагон',
+    wl_stat_cities: 'Шаҳрҳо',
+    wl_stat_satisfied: 'Қаноатманд',
     wl_brand_platform: 'Платформаи',
     wl_tagline: 'Интиқоли бор ва расонидани ҳавоӣ байни Русия, Тоҷикистон ва ИДМ.',
     wl_avia_desc: 'Бори ҳавоӣ  Русия ↔ Тоҷикистон',
@@ -415,6 +421,9 @@ export const translations = {
 
     // Welcome (new design)
     wl_lang_label: 'Interface language',
+    wl_stat_drivers: 'Drivers',
+    wl_stat_cities: 'Cities',
+    wl_stat_satisfied: 'Satisfied',
     wl_brand_platform: 'Platform',
     wl_tagline: 'Freight and air delivery between Russia, Tajikistan and the CIS.',
     wl_avia_desc: 'Air cargo  Russia ↔ Tajikistan',
