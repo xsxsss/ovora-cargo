@@ -274,10 +274,10 @@ export function SenderTripsPage() {
   // 'frozen' — водитель поставил поездку на паузу, но бронирование остаётся
   // активным (см. карточка в TripCard.tsx с пояснением и кнопкой отмены) —
   // должна оставаться в «Бронированиях», иначе поездка пропадает из всех табов.
-  const activeCount  = senderTrips.filter(t => t.status === 'active' || t.status === 'inProgress' || t.status === 'frozen').length;
+  const activeCount  = senderTrips.filter(t => t.status === 'planned' || t.status === 'active' || t.status === 'inProgress' || t.status === 'frozen').length;
   const cargosCount  = publishedCargos.length;
   const filteredTrips = senderTrips.filter(t => {
-    if (activeTab === 'active')    return t.status === 'active' || t.status === 'inProgress' || t.status === 'frozen';
+    if (activeTab === 'active')    return t.status === 'planned' || t.status === 'active' || t.status === 'inProgress' || t.status === 'frozen';
     if (activeTab === 'completed') return t.status === 'completed';
     if (activeTab === 'cancelled') return t.status === 'cancelled';
     return false;
