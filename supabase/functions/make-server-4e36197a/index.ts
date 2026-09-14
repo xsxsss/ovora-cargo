@@ -2221,8 +2221,15 @@ app.get("/make-server-4e36197a/cargo-offers/driver/:email", async (c) => {
       const keys = idx.filter((e: any) => e?.cargoId && e?.offerId).map((e: any) => `ovora:cargo-offer:${e.cargoId}:${e.offerId}`);
       if (keys.length) { const fetched: any[] = await kv.mget(keys); offers = fetched.filter(Boolean); }
     } else {
+      // ROOT-10: fallback + rebuild index
+      console.log(`[GET /cargo-offers/driver] No index for ${email}, falling back to full scan`);
       const all: any[] = await kv.getByPrefix("ovora:cargo-offer:");
       offers = all.filter(o => o && o.driverEmail === email);
+      for (const o of offers) {
+        if (o.cargoId && o.offerId) {
+          await kv.set(`ovora:drivercargooffers:${email}:${o.offerId}`, { cargoId: o.cargoId, offerId: o.offerId }).catch(() => {});
+        }
+      }
     }
     return c.json({ offers: offers.filter(o => !['cancelled','declined','deleted'].includes(o.status)).sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()) });
   } catch (err) {
@@ -2240,8 +2247,15 @@ app.get("/make-server-4e36197a/cargo-offers/sender/:email", async (c) => {
       const keys = idx.filter((e: any) => e?.cargoId && e?.offerId).map((e: any) => `ovora:cargo-offer:${e.cargoId}:${e.offerId}`);
       if (keys.length) { const fetched: any[] = await kv.mget(keys); offers = fetched.filter(Boolean); }
     } else {
+      // ROOT-10: fallback + rebuild index
+      console.log(`[GET /cargo-offers/sender] No index for ${email}, falling back to full scan`);
       const all: any[] = await kv.getByPrefix("ovora:cargo-offer:");
       offers = all.filter(o => o && o.senderEmail === email);
+      for (const o of offers) {
+        if (o.cargoId && o.offerId) {
+          await kv.set(`ovora:sendercargooffers:${email}:${o.offerId}`, { cargoId: o.cargoId, offerId: o.offerId }).catch(() => {});
+        }
+      }
     }
     return c.json({ offers: offers.filter(o => !['cancelled','deleted'].includes(o.status)).sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()) });
   } catch (err) {
@@ -5519,6 +5533,20 @@ app.delete("/make-server-4e36197a/admin/users/:email", async (c) => {
         originalName: `${existing.firstName || ""} ${existing.lastName || ""}`.trim(),
       });
     }
+
+    // ROOT-12: Cleanup push subscriptions and documents for deleted user
+    const pushSubs: any[] = await kv.getByPrefix(`ovora:push:sub:${email.toLowerCase().trim()}:`);
+    for (const sub of pushSubs) {
+      if (sub?.endpoint) await kv.del(`ovora:push:sub:${email.toLowerCase().trim()}:${sub.endpoint.slice(-20)}`).catch(() => {});
+    }
+    const docs: any[] = await kv.getByPrefix(`ovora:document:${email.toLowerCase().trim()}:`);
+    for (const doc of docs) {
+      if (doc?.id) await kv.del(`ovora:document:${email.toLowerCase().trim()}:${doc.id}`).catch(() => {});
+    }
+    if (pushSubs.length || docs.length) {
+      console.log(`[DELETE /admin/users] Cleaned up ${pushSubs.length} push subs, ${docs.length} documents for ${email}`);
+    }
+
     await CargoAuditLog.record({ action: 'user.admin_delete', actorEmail: adminActor(c), targetId: email, targetType: 'user', details: { role: existing.role, blacklisted: cleanPhone.length >= 7 } });
     return c.json({ success: true, blacklisted: cleanPhone.length >= 7 });
   } catch (err) {
