@@ -1,1 +1,0 @@
-function a(e){const s=e.split("").reduce((t,r)=>(t<<5)-t+r.charCodeAt(0)|0,0);return Math.abs(s).toString(36).slice(0,8)}function o(e,s){const t=[e||"guest",s||"guest"].sort(),r=a(t[0]),n=a(t[1]);return`pair_${r}_${n}`}export{o as g};
