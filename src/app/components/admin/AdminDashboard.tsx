@@ -10,6 +10,7 @@ import { SimpleBarChart } from '../ui/SimpleBarChart';
 import { getAdminTrips, getAdminUsers, getAdminOffers, getAdminReviews } from '../../api/dataApi';
 import { getAviaAdminUsers, getAviaAdminDeals, getAviaAdminFlights } from '../../api/aviaAdminApi';
 import { PLATFORM_THEME } from './platformTheme';
+import { isLiveTrip, offerStatusBreakdown, TRIP_STATUS_META, tripStatusBreakdown, tripStatusKey } from './tripStatus';
 import { toast } from 'sonner';
 import { exportCsv } from '../../utils/adminCsvExport';
 
@@ -26,19 +27,6 @@ function RelTime({ iso }: { iso: string }) {
   return <span>{Math.floor(hrs / 24)} дн. назад</span>;
 }
 
-const STATUS_COLOR: Record<string, string> = {
-  active: '#3b82f6',
-  completed: '#10b981',
-  cancelled: '#ef4444',
-  scheduled: '#f59e0b',
-};
-
-const STATUS_LABEL: Record<string, string> = {
-  active: 'Активна',
-  completed: 'Завершена',
-  cancelled: 'Отменена',
-  scheduled: 'Запланирована',
-};
 
 type AdminRole = 'super-admin' | 'cargo-admin' | 'avia-admin';
 
@@ -89,7 +77,7 @@ export function AdminDashboard() {
         reviews: (reviewsData || []).length,
         acceptedOffers: o.filter((x: any) => x?.status === 'accepted').length,
         pendingOffers: o.filter((x: any) => x?.status === 'pending').length,
-        activeTrips: validTrips.filter((x: any) => x.status === 'active').length,
+        activeTrips: validTrips.filter((x: any) => isLiveTrip(x)).length,
       });
       setLastUpdated(new Date());
     } catch (err) {
@@ -138,17 +126,8 @@ export function AdminDashboard() {
       driverMap[t.driverEmail].trips++;
     });
     return {
-      tripStatusData: [
-        { name: 'Активные',      value: trips.filter(t => t?.status === 'active').length,                    color: '#3b82f6' },
-        { name: 'Завершены',     value: trips.filter(t => t?.status === 'completed').length,                 color: '#10b981' },
-        { name: 'Отменены',      value: trips.filter(t => t?.status === 'cancelled' || t?.deletedAt).length, color: '#ef4444' },
-        { name: 'Запланированы', value: trips.filter(t => t?.status === 'scheduled').length,                 color: '#f59e0b' },
-      ].filter(d => d.value > 0),
-      offerStatusData: [
-        { name: 'Ожидают',   value: offers.filter(o => o?.status === 'pending').length,                              color: '#f59e0b' },
-        { name: 'Приняты',   value: offers.filter(o => o?.status === 'accepted').length,                             color: '#10b981' },
-        { name: 'Отклонены', value: offers.filter(o => o?.status === 'rejected' || o?.status === 'declined').length, color: '#ef4444' },
-      ].filter(d => d.value > 0),
+      tripStatusData: tripStatusBreakdown(trips),
+      offerStatusData: offerStatusBreakdown(offers),
       userRoleData: [
         { name: 'Водители',    value: users.filter(u => u?.role === 'driver').length, color: '#3b82f6' },
         { name: 'Отправители', value: users.filter(u => u?.role === 'sender').length, color: '#8b5cf6' },
@@ -551,11 +530,11 @@ export function AdminDashboard() {
                 <div key={trip.id} className="flex items-center gap-3 p-3 rounded-xl hover:bg-gray-50 transition-colors">
                   <div
                     className="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0"
-                    style={{ background: (STATUS_COLOR[trip.status] || '#94a3b8') + '20' }}
+                    style={{ background: (TRIP_STATUS_META[tripStatusKey(trip)].color) + '20' }}
                   >
                     <div
                       className="w-2.5 h-2.5 rounded-full"
-                      style={{ backgroundColor: STATUS_COLOR[trip.status] || '#94a3b8' }}
+                      style={{ backgroundColor: TRIP_STATUS_META[tripStatusKey(trip)].color }}
                     />
                   </div>
                   <div className="flex-1 min-w-0">
@@ -569,11 +548,11 @@ export function AdminDashboard() {
                   <span
                     className="hidden sm:inline text-[10px] font-semibold px-2 py-1 rounded-lg flex-shrink-0"
                     style={{
-                      background: (STATUS_COLOR[trip.status] || '#94a3b8') + '18',
-                      color: STATUS_COLOR[trip.status] || '#94a3b8',
+                      background: (TRIP_STATUS_META[tripStatusKey(trip)].color) + '18',
+                      color: TRIP_STATUS_META[tripStatusKey(trip)].color,
                     }}
                   >
-                    {STATUS_LABEL[trip.status] || trip.status}
+                    {TRIP_STATUS_META[tripStatusKey(trip)].label}
                   </span>
                 </div>
               ))}

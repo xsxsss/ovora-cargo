@@ -7,6 +7,7 @@ import { TrendingUp, Users, Car, Package, MapPin, RefreshCw, Activity, BarChart3
 import { getAdminTrips, getAdminUsers, getAdminOffers, getAdminReviews } from '../../api/dataApi';
 import { toast } from 'sonner';
 import { AdminPageHeader, HeaderBtn, SkeletonList } from './AdminPageHeader';
+import { offerStatusBreakdown, tripStatusBreakdown } from './tripStatus';
 
 const _COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899'];
 
@@ -74,20 +75,10 @@ export function Analytics() {
   const userGrowthData = days14.map(d => ({ date: d, users: usersByDay[d] }));
 
   // Trip status breakdown
-  const tripStatusData = [
-    { name: 'Активные', value: trips.filter(t => t?.status === 'active' && !t.deletedAt).length, color: '#3b82f6' },
-    { name: 'Завершены', value: trips.filter(t => t?.status === 'completed').length, color: '#10b981' },
-    { name: 'Отменены', value: trips.filter(t => t?.status === 'cancelled' || t?.deletedAt).length, color: '#ef4444' },
-    { name: 'Запланированы', value: trips.filter(t => t?.status === 'scheduled').length, color: '#f59e0b' },
-  ].filter(d => d.value > 0);
+  const tripStatusData = tripStatusBreakdown(trips);
 
   // Offer status breakdown
-  const offerStatusData = [
-    { name: 'Ожидают', value: offers.filter(o => o?.status === 'pending').length, color: '#f59e0b' },
-    { name: 'Приняты', value: offers.filter(o => o?.status === 'accepted').length, color: '#10b981' },
-    { name: 'Отклонены', value: offers.filter(o => o?.status === 'rejected').length, color: '#ef4444' },
-    { name: 'Отменены', value: offers.filter(o => o?.status === 'declined').length, color: '#94a3b8' },
-  ].filter(d => d.value > 0);
+  const offerStatusData = offerStatusBreakdown(offers);
 
   // User role breakdown
   const userRoleData = [

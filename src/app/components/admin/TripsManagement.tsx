@@ -7,6 +7,7 @@ import { SHIPMENT_STATUS_LABELS, SHIPMENT_STATUS_ICONS } from '../../api/trackin
 import { projectId } from '../../../../utils/supabase/info';
 import { AdminPageHeader, HeaderBtn, FilterChips, SkeletonList, Pagination } from './AdminPageHeader';
 import { exportCsv } from '../../utils/adminCsvExport';
+import { TRIP_STATUS_META, tripStatusKey } from './tripStatus';
 
 const BASE = `https://${projectId}.supabase.co/functions/v1/make-server-4e36197a`;
 
@@ -91,10 +92,11 @@ export function TripsManagement() {
 
   const statusCounts = {
     all: trips.length,
-    active: trips.filter(t => t?.status === 'active' && !t.deletedAt).length,
-    completed: trips.filter(t => t?.status === 'completed').length,
-    scheduled: trips.filter(t => t?.status === 'scheduled').length,
-    cancelled: trips.filter(t => t?.status === 'cancelled' || t?.deletedAt).length,
+    planned: trips.filter(t => t && tripStatusKey(t) === 'planned').length,
+    inProgress: trips.filter(t => t && tripStatusKey(t) === 'inProgress').length,
+    frozen: trips.filter(t => t && tripStatusKey(t) === 'frozen').length,
+    completed: trips.filter(t => t && tripStatusKey(t) === 'completed').length,
+    cancelled: trips.filter(t => t && tripStatusKey(t) === 'cancelled').length,
   };
 
   const filtered = trips
@@ -106,9 +108,7 @@ export function TripsManagement() {
         || (t.to || '').toLowerCase().includes(q)
         || (t.driverName || '').toLowerCase().includes(q)
         || (t.driverEmail || '').toLowerCase().includes(q);
-      const isCancel = t.status === 'cancelled' || t.deletedAt;
-      const matchStatus = statusFilter === 'all'
-        || (statusFilter === 'cancelled' ? isCancel : t.status === statusFilter && !isCancel);
+      const matchStatus = statusFilter === 'all' || tripStatusKey(t) === statusFilter;
       return matchSearch && matchStatus;
     })
     .sort((a, b) => {
@@ -127,13 +127,6 @@ export function TripsManagement() {
   const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
   const paged = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
 
-  const STATUS_META: Record<string, { label: string; dot: string; bg: string; text: string }> = {
-    active:    { label: 'Активная',      dot: '#3b82f6', bg: '#eff6ff', text: '#1d4ed8' },
-    completed: { label: 'Завершена',     dot: '#10b981', bg: '#f0fdf4', text: '#15803d' },
-    cancelled: { label: 'Отменена',      dot: '#ef4444', bg: '#fef2f2', text: '#dc2626' },
-    scheduled: { label: 'Запланирована', dot: '#f59e0b', bg: '#fffbeb', text: '#b45309' },
-  };
-
   return (
     <div className="space-y-5">
       <AdminPageHeader
@@ -144,9 +137,9 @@ export function TripsManagement() {
         accent="#059669"
         stats={[
           { label: 'Всего', value: statusCounts.all },
-          { label: 'Активных', value: statusCounts.active },
+          { label: 'В пути', value: statusCounts.inProgress },
           { label: 'Завершено', value: statusCounts.completed },
-          { label: 'Запланировано', value: statusCounts.scheduled },
+          { label: 'Запланировано', value: statusCounts.planned },
         ]}
         actions={
           <>
@@ -178,9 +171,10 @@ export function TripsManagement() {
           onChange={setStatusFilter as any}
           options={[
             { value: 'all',       label: 'Все поездки',   count: statusCounts.all },
-            { value: 'active',    label: '🔵 Активные',    count: statusCounts.active },
-            { value: 'completed', label: '✅ Завершены',   count: statusCounts.completed },
-            { value: 'scheduled', label: '🕐 Запланированы', count: statusCounts.scheduled },
+            { value: 'planned',    label: '🕐 Запланированы', count: statusCounts.planned },
+            { value: 'inProgress', label: '🔵 В пути',        count: statusCounts.inProgress },
+            { value: 'frozen',     label: '❄️ Заморожены',    count: statusCounts.frozen },
+            { value: 'completed',  label: '✅ Завершены',     count: statusCounts.completed },
             { value: 'cancelled', label: '❌ Отменены',    count: statusCounts.cancelled },
           ]}
         />
@@ -227,9 +221,9 @@ export function TripsManagement() {
           {paged.map(trip => {
             const isExpanded = expandedId === trip.id;
             const isActLoading = actionLoading === trip.id;
-            const isCancelled = trip.status === 'cancelled' || trip.deletedAt;
-            const statusKey = isCancelled ? 'cancelled' : (trip.status || 'active');
-            const meta = STATUS_META[statusKey] || STATUS_META.active;
+            const statusKey = tripStatusKey(trip);
+            const isCancelled = statusKey === 'cancelled';
+            const meta = TRIP_STATUS_META[statusKey];
             const tripOffers = offersByTrip[trip.id] || [];
             const acceptedOffers = tripOffers.filter(o => o.status === 'accepted');
             const pendingOffers = tripOffers.filter(o => o.status === 'pending');
@@ -252,7 +246,7 @@ export function TripsManagement() {
                       className="w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0"
                       style={{ background: meta.bg }}
                     >
-                      <div className="w-3 h-3 rounded-full" style={{ background: meta.dot }} />
+                      <div className="w-3 h-3 rounded-full" style={{ background: meta.color }} />
                     </div>
 
                     {/* Route */}
