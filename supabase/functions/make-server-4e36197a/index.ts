@@ -1955,53 +1955,32 @@ app.put("/make-server-4e36197a/offers/:tripId/:offerId", async (c) => {
     const { callerEmail: _drop, ...safeBody } = body;
     const updated = { ...existing, ...safeBody, tripId, offerId, updatedAt: new Date().toISOString() };
 
-    // ── Защита от overbooking: при ACCEPT проверяем, что у рейса всё ещё
-    // хватает мест/груза, ДО того как пометить оферту принятой. Без этого два
-    // параллельных accept на разные оферты одного рейса могли оба пройти —
-    // вместимость просто клампилась к 0, а обе оферты считались принятыми.
+    // ── W2: Capacity check BEFORE recording the offer ──────────────────────
+    // adjustTripCapacity uses setIfUnchanged for atomic conditional write.
+    // Order: capacity first, then record offer. On insufficient → 409.
     if (updated.status === 'accepted' && existing.status !== 'accepted') {
-      const trip: any = await kv.get(`ovora:trip:${tripId}`);
-      if (trip) {
-        const needSeats = existing.requestedSeats || 0;
-        const needChildren = existing.requestedChildren || 0;
-        const needCargo = existing.requestedCargo || 0;
-        if (
-          needSeats > (trip.availableSeats || 0) ||
-          needChildren > (trip.childSeats || 0) ||
-          needCargo > (trip.cargoCapacity || 0)
-        ) {
-          console.warn(`[PUT /offers] Accept rejected: insufficient capacity on trip ${tripId} for offer ${offerId}`);
-          return c.json({ error: "INSUFFICIENT_CAPACITY: not enough seats/cargo capacity left on this trip" }, 409);
-        }
+      const capResult = await adjustTripCapacity(tripId, existing, -1);
+      if (capResult === 'insufficient') {
+        return c.json({ error: "INSUFFICIENT_CAPACITY: not enough seats/cargo capacity left on this trip" }, 409);
+      }
+      if (capResult === 'conflict') {
+        return c.json({ error: "CAPACITY_CONFLICT: try again" }, 503);
+      }
+      if (capResult === 'not_found') {
+        return c.json({ error: "Trip not found" }, 404);
       }
     }
 
     await kv.set(key, updated);
 
-    // ── Reduce trip capacity when this route is the one accepting the offer ──
-    // (mirrors the capacity reduction in PUT /chat/:chatId/proposal/:proposalId,
-    // needed when the offer is accepted directly from the offers/trip page
-    // instead of via the chat proposal card — otherwise capacity never shrinks)
-    if (updated.status === 'accepted' && existing.status !== 'accepted') {
-      try {
-        const trip: any = await kv.get(`ovora:trip:${tripId}`);
-        if (trip) {
-          const updatedTrip = {
-            ...trip,
-            availableSeats: Math.max(0, (trip.availableSeats || 0) - (existing.requestedSeats || 0)),
-            childSeats: Math.max(0, (trip.childSeats || 0) - (existing.requestedChildren || 0)),
-            cargoCapacity: Math.max(0, (trip.cargoCapacity || 0) - (existing.requestedCargo || 0)),
-          };
-          await kv.set(`ovora:trip:${tripId}`, updatedTrip);
-          console.log(`[PUT /offers] Trip ${tripId} capacity reduced on accept via offers route`);
-        }
-      } catch (capErr) {
-        console.log('[PUT /offers] Error reducing trip capacity:', capErr);
-      }
+    const isFinalStatus = ['cancelled', 'declined', 'deleted', 'rejected'].includes(updated.status);
+
+    // ── W2: Restore capacity when rejecting/cancelling an accepted offer ────
+    if (isFinalStatus && existing.status === 'accepted') {
+      await restoreTripCapacity(tripId, existing, `PUT /offers reject/${offerId}`);
     }
 
     // ✅ FIX #6: При cancelled/declined/deleted — удаляем индексы, иначе обновляем
-    const isFinalStatus = ['cancelled', 'declined', 'deleted', 'rejected'].includes(updated.status);
     if (isFinalStatus) {
       if (existing.driverEmail) {
         await kv.del(`ovora:driveroffers:${existing.driverEmail}:${offerId}`).catch(() => {});
