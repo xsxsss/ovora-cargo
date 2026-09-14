@@ -1,5 +1,6 @@
 import { projectId, publicAnonKey } from '../../../utils/supabase/info';
 import { CSRF_HEADER, CSRF_TOKEN } from './csrfToken';
+import { withUserToken } from './userToken';
 
 const BASE = `https://${projectId}.supabase.co/functions/v1/make-server-4e36197a`;
 const HEADERS = {
@@ -123,7 +124,7 @@ export async function saveActiveShipment(
 ): Promise<ActiveShipment> {
   const res = await fetch(`${BASE}/tracking/${encodeURIComponent(shipment.tripId)}`, {
     method: 'PUT',
-    headers: HEADERS,
+    headers: withUserToken(HEADERS),
     body: JSON.stringify({ ...shipment, callerEmail }),
   });
 
@@ -143,7 +144,7 @@ export async function getActiveShipment(tripId: string, callerEmail: string): Pr
     if (!callerEmail) return null;
     const res = await fetch(`${BASE}/tracking/${encodeURIComponent(tripId)}?callerEmail=${encodeURIComponent(callerEmail)}`, {
       method: 'GET',
-      headers: HEADERS,
+      headers: withUserToken(HEADERS),
     });
     if (!res.ok) return null;
     const data = await res.json();
@@ -158,7 +159,7 @@ export async function getActiveShipment(tripId: string, callerEmail: string): Pr
 export async function getUserShipments(userEmail: string, role: 'driver' | 'sender'): Promise<ActiveShipment[]> {
   try {
     const url = `${BASE}/tracking/user/${encodeURIComponent(userEmail)}?role=${role}`;
-    const res = await fetch(url, { method: 'GET', headers: HEADERS });
+    const res = await fetch(url, { method: 'GET', headers: withUserToken(HEADERS) });
     if (!res.ok) return [];
     const data = await res.json();
     return data.values || [];
@@ -202,7 +203,7 @@ export async function updateShipmentStatus(
   try {
     const res = await fetch(`${BASE}/tracking/${encodeURIComponent(tripId)}/status`, {
       method: 'POST',
-      headers: HEADERS,
+      headers: withUserToken(HEADERS),
       body: JSON.stringify({ status, driverEmail }),
     });
     if (!res.ok) {
@@ -229,7 +230,7 @@ export async function uploadPODPhoto(
   try {
     const res = await fetch(`${BASE}/tracking/${encodeURIComponent(tripId)}/pod`, {
       method: 'POST',
-      headers: HEADERS,
+      headers: withUserToken(HEADERS),
       body: JSON.stringify({ base64, type, driverEmail }),
     });
     if (!res.ok) {
@@ -249,7 +250,7 @@ export async function getPODPhotos(tripId: string): Promise<PODPhoto[]> {
   try {
     const res = await fetch(`${BASE}/tracking/${encodeURIComponent(tripId)}/pod`, {
       method: 'GET',
-      headers: HEADERS,
+      headers: withUserToken(HEADERS),
     });
     if (!res.ok) return [];
     const data = await res.json();
@@ -265,7 +266,7 @@ export async function getPublicTracking(tripId: string): Promise<ActiveShipment 
   try {
     const res = await fetch(`${BASE}/public/tracking/${encodeURIComponent(tripId)}`, {
       method: 'GET',
-      headers: { Authorization: `Bearer ${publicAnonKey}` },
+      headers: withUserToken({ Authorization: `Bearer ${publicAnonKey}` }),
     });
     if (!res.ok) return null;
     const data = await res.json();

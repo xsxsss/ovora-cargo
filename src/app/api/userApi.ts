@@ -1,5 +1,6 @@
 import { projectId, publicAnonKey } from '../../../utils/supabase/info';
 import { CSRF_HEADER, CSRF_TOKEN } from './csrfToken';
+import { withUserToken } from './userToken';
 
 const BASE = `https://${projectId}.supabase.co/functions/v1/make-server-4e36197a`;
 const HEADERS = {
@@ -27,7 +28,7 @@ export interface User {
  */
 export async function getUser(email: string): Promise<User | null> {
   const res = await fetch(`${BASE}/users/${encodeURIComponent(email)}`, {
-    headers: HEADERS,
+    headers: withUserToken(HEADERS),
   });
 
   if (!res.ok) {
@@ -48,7 +49,7 @@ export async function getUser(email: string): Promise<User | null> {
 export async function updateUser(email: string, updates: Partial<User>): Promise<User | null> {
   const res = await fetch(`${BASE}/users/${encodeURIComponent(email)}`, {
     method: 'PUT',
-    headers: HEADERS,
+    headers: withUserToken(HEADERS),
     body: JSON.stringify({ ...updates, callerEmail: email }),
   });
 
@@ -73,7 +74,8 @@ export async function uploadAvatar(email: string, file: File): Promise<string> {
 
   const res = await fetch(`${BASE}/users/${encodeURIComponent(email)}/avatar`, {
     method: 'POST',
-    headers: { Authorization: `Bearer ${publicAnonKey}` }, // Content-Type omitted — browser sets it with boundary
+    // Content-Type не ставим — браузер сам добавит boundary. CSRF обязателен для любого POST.
+    headers: withUserToken({ Authorization: `Bearer ${publicAnonKey}`, [CSRF_HEADER]: CSRF_TOKEN }),
     body: formData,
   });
 
@@ -99,7 +101,7 @@ export async function syncUserNameInChats(
   try {
     const res = await fetch(`${BASE}/users/${encodeURIComponent(email)}/sync-chats`, {
       method: 'PUT',
-      headers: HEADERS,
+      headers: withUserToken(HEADERS),
       body: JSON.stringify(userData),
     });
     if (!res.ok) {
@@ -122,7 +124,7 @@ export async function syncUserNameInTrips(
   try {
     const res = await fetch(`${BASE}/users/${encodeURIComponent(email)}/sync-trips`, {
       method: 'PUT',
-      headers: HEADERS,
+      headers: withUserToken(HEADERS),
       body: JSON.stringify(userData),
     });
     if (!res.ok) {

@@ -6,6 +6,7 @@
 
 import { projectId, publicAnonKey } from '../../../utils/supabase/info';
 import { CSRF_HEADER, CSRF_TOKEN } from '../api/csrfToken';
+import { withUserToken } from '../api/userToken';
 
 const BASE = `https://${projectId}.supabase.co/functions/v1/make-server-4e36197a`;
 const PUSH_STATE_KEY = 'ovora_push_subscribed'; // 'yes' | 'denied' | ''
@@ -48,7 +49,7 @@ async function getVapidPublicKey(retries = 3): Promise<string> {
   for (let i = 0; i < retries; i++) {
     try {
       const res = await fetch(`${BASE}/push/vapid-key`, {
-        headers: { Authorization: `Bearer ${publicAnonKey}` },
+        headers: withUserToken({ Authorization: `Bearer ${publicAnonKey}` }),
       });
       if (res.status === 503) {
         // Server still initializing VAPID — wait and retry
@@ -97,11 +98,11 @@ export async function subscribeToPush(userEmail: string): Promise<'granted' | 'd
     // Save to server
     const res = await fetch(`${BASE}/push/subscribe`, {
       method: 'POST',
-      headers: {
+      headers: withUserToken({
         'Content-Type': 'application/json',
         Authorization: `Bearer ${publicAnonKey}`,
         [CSRF_HEADER]: CSRF_TOKEN,
-      },
+      }),
       body: JSON.stringify({ email: userEmail, subscription: subscription.toJSON() }),
     });
 
@@ -133,11 +134,11 @@ export async function unsubscribeFromPush(userEmail: string): Promise<void> {
       // Notify server
       await fetch(`${BASE}/push/unsubscribe`, {
         method: 'POST',
-        headers: {
+        headers: withUserToken({
           'Content-Type': 'application/json',
           Authorization: `Bearer ${publicAnonKey}`,
           [CSRF_HEADER]: CSRF_TOKEN,
-        },
+        }),
         body: JSON.stringify({ email: userEmail, endpoint: subscription.endpoint }),
       }).catch(() => {});
 
@@ -171,11 +172,11 @@ export async function ensurePushSubscription(userEmail: string): Promise<void> {
       const _vapidKey = await getVapidPublicKey();
       await fetch(`${BASE}/push/subscribe`, {
         method: 'POST',
-        headers: {
+        headers: withUserToken({
           'Content-Type': 'application/json',
           Authorization: `Bearer ${publicAnonKey}`,
           [CSRF_HEADER]: CSRF_TOKEN,
-        },
+        }),
         body: JSON.stringify({ email: userEmail, subscription: subscription.toJSON() }),
       }).catch(() => {});
     }

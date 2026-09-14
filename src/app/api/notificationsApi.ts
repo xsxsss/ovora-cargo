@@ -1,5 +1,6 @@
 import { projectId, publicAnonKey } from '../../../utils/supabase/info';
 import { CSRF_HEADER, CSRF_TOKEN } from './csrfToken';
+import { withUserToken } from './userToken';
 
 const API_BASE = `https://${projectId}.supabase.co/functions/v1/make-server-4e36197a`;
 
@@ -30,11 +31,11 @@ export interface CreateNotificationInput {
 export async function createNotification(data: CreateNotificationInput): Promise<Notification> {
   const res = await fetch(`${API_BASE}/notifications`, {
     method: 'POST',
-    headers: {
+    headers: withUserToken({
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${publicAnonKey}`,
       [CSRF_HEADER]: CSRF_TOKEN,
-    },
+    }),
     body: JSON.stringify(data),
   });
   const json = await res.json();
@@ -47,7 +48,7 @@ export async function createNotification(data: CreateNotificationInput): Promise
  */
 export async function getNotifications(userEmail: string): Promise<Notification[]> {
   const res = await fetch(`${API_BASE}/notifications/${encodeURIComponent(userEmail)}`, {
-    headers: { 'Authorization': `Bearer ${publicAnonKey}` },
+    headers: withUserToken({ 'Authorization': `Bearer ${publicAnonKey}` }),
   });
   const json = await res.json();
   if (!res.ok) throw new Error(json.error || 'Failed to fetch notifications');
@@ -60,11 +61,11 @@ export async function getNotifications(userEmail: string): Promise<Notification[
 export async function markNotificationRead(userEmail: string, notificationId: string): Promise<void> {
   const res = await fetch(`${API_BASE}/notifications/${encodeURIComponent(userEmail)}/${notificationId}/read`, {
     method: 'PUT',
-    headers: {
+    headers: withUserToken({
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${publicAnonKey}`,
       [CSRF_HEADER]: CSRF_TOKEN,
-    },
+    }),
   });
   const json = await res.json();
   if (!res.ok) throw new Error(json.error || 'Failed to mark notification as read');
@@ -76,11 +77,11 @@ export async function markNotificationRead(userEmail: string, notificationId: st
 export async function markAllNotificationsRead(userEmail: string): Promise<void> {
   const res = await fetch(`${API_BASE}/notifications/${encodeURIComponent(userEmail)}/read-all`, {
     method: 'PUT',
-    headers: {
+    headers: withUserToken({
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${publicAnonKey}`,
       [CSRF_HEADER]: CSRF_TOKEN,
-    },
+    }),
   });
   const json = await res.json();
   if (!res.ok) throw new Error(json.error || 'Failed to mark all notifications as read');
@@ -92,7 +93,7 @@ export async function markAllNotificationsRead(userEmail: string): Promise<void>
 export async function deleteNotification(userEmail: string, notificationId: string): Promise<void> {
   const res = await fetch(`${API_BASE}/notifications/${encodeURIComponent(userEmail)}/${notificationId}`, {
     method: 'DELETE',
-    headers: { 'Authorization': `Bearer ${publicAnonKey}`, [CSRF_HEADER]: CSRF_TOKEN },
+    headers: withUserToken({ 'Authorization': `Bearer ${publicAnonKey}`, [CSRF_HEADER]: CSRF_TOKEN }),
   });
   const json = await res.json();
   if (!res.ok) throw new Error(json.error || 'Failed to delete notification');
@@ -104,7 +105,7 @@ export async function deleteNotification(userEmail: string, notificationId: stri
 export async function deleteAllNotifications(userEmail: string): Promise<void> {
   const res = await fetch(`${API_BASE}/notifications/${encodeURIComponent(userEmail)}`, {
     method: 'DELETE',
-    headers: { 'Authorization': `Bearer ${publicAnonKey}`, [CSRF_HEADER]: CSRF_TOKEN },
+    headers: withUserToken({ 'Authorization': `Bearer ${publicAnonKey}`, [CSRF_HEADER]: CSRF_TOKEN }),
   });
   const json = await res.json();
   if (!res.ok) throw new Error(json.error || 'Failed to delete all notifications');

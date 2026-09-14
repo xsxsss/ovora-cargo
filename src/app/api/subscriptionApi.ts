@@ -1,5 +1,6 @@
 import { projectId, publicAnonKey } from '../../../utils/supabase/info';
 import { CSRF_HEADER, CSRF_TOKEN } from './csrfToken';
+import { withUserToken } from './userToken';
 
 const BASE = `https://${projectId}.supabase.co/functions/v1/make-server-4e36197a`;
 const HEADERS = {
@@ -77,7 +78,7 @@ export function calcPricePerUser(
 export async function getSubscription(email: string): Promise<Subscription | null> {
   try {
     const res = await fetch(`${BASE}/subscription/${encodeURIComponent(email)}`, {
-      headers: HEADERS,
+      headers: withUserToken(HEADERS),
     });
     if (!res.ok) return null;
     const data = await res.json();
@@ -95,7 +96,7 @@ export async function submitPaymentRequest(
 ): Promise<{ success: boolean; message: string }> {
   const res = await fetch(`${BASE}/subscription/request`, {
     method: 'POST',
-    headers: HEADERS,
+    headers: withUserToken(HEADERS),
     body: JSON.stringify({ email, txId, currency, amount }),
   });
   const data = await res.json();
@@ -105,7 +106,7 @@ export async function submitPaymentRequest(
 
 export async function getSubStats(): Promise<SubStats> {
   const res = await fetch(`${BASE}/admin/subscription/stats`, {
-    headers: HEADERS,
+    headers: withUserToken(HEADERS),
   });
   const data = await res.json();
   return data.stats;
@@ -113,7 +114,7 @@ export async function getSubStats(): Promise<SubStats> {
 
 export async function getAllSubscriptions(): Promise<Subscription[]> {
   const res = await fetch(`${BASE}/admin/subscriptions`, {
-    headers: HEADERS,
+    headers: withUserToken(HEADERS),
   });
   const data = await res.json();
   return data.subscriptions || [];
@@ -125,7 +126,7 @@ export async function activateSubscription(
 ): Promise<void> {
   const res = await fetch(`${BASE}/admin/subscription/activate`, {
     method: 'POST',
-    headers: HEADERS,
+    headers: withUserToken(HEADERS),
     body: JSON.stringify({ email, adminEmail }),
   });
   if (!res.ok) {
@@ -140,7 +141,7 @@ export async function grantLifetime(
 ): Promise<void> {
   const res = await fetch(`${BASE}/admin/subscription/lifetime`, {
     method: 'POST',
-    headers: HEADERS,
+    headers: withUserToken(HEADERS),
     body: JSON.stringify({ email, adminEmail }),
   });
   if (!res.ok) {
@@ -155,7 +156,7 @@ export async function revokeSubscription(
 ): Promise<void> {
   const res = await fetch(`${BASE}/admin/subscription/revoke`, {
     method: 'POST',
-    headers: HEADERS,
+    headers: withUserToken(HEADERS),
     body: JSON.stringify({ email, adminEmail }),
   });
   if (!res.ok) {

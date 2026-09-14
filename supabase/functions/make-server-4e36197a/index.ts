@@ -434,6 +434,20 @@ function getCallerEmail(c: any, body?: any): string | null {
   return body?.callerEmail || null;
 }
 
+// Кто делает запрос. Email в теле, адресе или форме — просто текст: подставить можно любой.
+// При токен-авторизации верим только подписанному токену; без секрета (legacy) — заявленному.
+function actingAs(c: any, claimed: unknown): string {
+  return getCallerEmail(c, { callerEmail: claimed == null ? null : String(claimed) }) || '';
+}
+
+function isActingAs(c: any, email: unknown): boolean {
+  const verified = c.get("verifiedEmail");
+  if (verified) return String(verified).toLowerCase().trim() === String(email || '').toLowerCase().trim();
+  return !userAuthEnabled();
+}
+
+const FORBIDDEN_NOT_YOU = { error: "Forbidden: you can only act on your own account" };
+
 // Применяем middleware ко всем /admin/* и /kv/* маршрутам (КРОМЕ /admin/auth).
 // CARGO-эндпоинты доступны cargo-admin и super-admin (см. CLAUDE.md RBAC).
 app.use('/make-server-4e36197a/admin/*', async (c, next) => {
@@ -928,7 +942,8 @@ app.get("/make-server-4e36197a/config/test-ocr-direct", requireAdminChecked, asy
 app.post("/make-server-4e36197a/ocr/scan-document", async (c) => {
   try {
     const body = await c.req.json();
-    const { imageBase64, documentType, callerEmail } = body;
+    const { imageBase64, documentType } = body;
+    const callerEmail = actingAs(c, body.callerEmail);
 
     // Require authenticated user — prevents cost hijacking by anonymous callers
     if (!callerEmail) {
@@ -1318,6 +1333,13 @@ app.post("/make-server-4e36197a/trips", async (c) => {
     if (!(Number(body.availableSeats) > 0) && !(Number(body.cargoCapacity) > 0)) {
       return c.json({ error: "Trip must have either availableSeats or cargoCapacity greater than 0" }, 400);
     }
+    if (!body.driverEmail) return c.json({ error: "driverEmail required" }, 400);
+    if (!isActingAs(c, body.driverEmail)) return c.json(FORBIDDEN_NOT_YOU, 403);
+    for (const field of ['availableSeats', 'childSeats', 'cargoCapacity', 'pricePerSeat', 'pricePerKg']) {
+      if (body[field] != null && body[field] !== '' && !(Number(body[field]) >= 0)) {
+        return c.json({ error: `${field} must be a non-negative number` }, 400);
+      }
+    }
 
     const id = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     const now = new Date().toISOString();
@@ -1333,7 +1355,11 @@ app.post("/make-server-4e36197a/trips", async (c) => {
       id, 
       createdAt: now, 
       updatedAt: now, 
-      status: body.status || 'active' 
+      deletedAt: undefined,
+      completedAt: undefined,
+      // Новая поездка всегда planned (CreateAnnouncementPage.tsx шлёт его же): иначе можно
+      // создать сразу «завершённую» или «в пути», минуя переходы статусов PUT /trips.
+      status: 'planned',
     };
     
     // ✅ Log capacity fields for debugging
@@ -1697,6 +1723,8 @@ app.post("/make-server-4e36197a/cargos",
 
     const lenErr = assertMaxLen(body, { from: 200, to: 200, notes: 1000, senderEmail: 254, senderName: 100, description: 500 });
     if (lenErr) return c.json({ error: lenErr }, 400);
+    if (!body.senderEmail) return c.json({ error: "senderEmail required" }, 400);
+    if (!isActingAs(c, body.senderEmail)) return c.json(FORBIDDEN_NOT_YOU, 403);
 
     const id = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     const now = new Date().toISOString();
@@ -1712,7 +1740,9 @@ app.post("/make-server-4e36197a/cargos",
       id, 
       createdAt: now, 
       updatedAt: now, 
-      status: body.status || 'active' 
+      deletedAt: undefined,
+      // Статусом груза управляет замок отклика (active → matched): создаётся всегда active.
+      status: 'active',
     };
     
     console.log(`[POST /cargos] Creating cargo ${id}:`, `${cargo.from} → ${cargo.to}`);
@@ -2017,6 +2047,7 @@ app.get("/make-server-4e36197a/offers/trip/:tripId", async (c) => {
 app.get("/make-server-4e36197a/offers/user/:email", async (c) => {
   try {
     const email = decodeURIComponent(c.req.param("email"));
+    if (!isActingAs(c, email)) return c.json(FORBIDDEN_NOT_YOU, 403);
 
     // ✅ Используем вторичный индекс — без full-scan всех офертов
     const indexEntries: any[] = await kv.getByPrefix(`ovora:senderoffers:${email}:`);
@@ -2064,6 +2095,7 @@ app.get("/make-server-4e36197a/offers/user/:email", async (c) => {
 app.get("/make-server-4e36197a/offers/driver/:email", async (c) => {
   try {
     const email = decodeURIComponent(c.req.param("email"));
+    if (!isActingAs(c, email)) return c.json(FORBIDDEN_NOT_YOU, 403);
 
     // ── Шаг 1: читаем вторичный индекс ──────────────────────────────────────
     const indexEntries: any[] = await kv.getByPrefix(`ovora:driveroffers:${email}:`);
@@ -2124,6 +2156,7 @@ app.post("/make-server-4e36197a/offers/cleanup", async (c) => {
   try {
     const { driverEmail } = await c.req.json();
     if (!driverEmail) return c.json({ error: 'driverEmail required' }, 400);
+    if (!isActingAs(c, driverEmail)) return c.json(FORBIDDEN_NOT_YOU, 403);
 
     // Все pending offers водителя
     const indexEntries: any[] = await kv.getByPrefix(`ovora:driveroffers:${driverEmail}:`);
@@ -2402,9 +2435,14 @@ app.post("/make-server-4e36197a/cargo-offers", async (c) => {
     if (!cargoId) return c.json({ error: "cargoId required" }, 400);
     if (!driverEmail) return c.json({ error: "driverEmail required" }, 400);
     if (!driverName) return c.json({ error: "driverName required" }, 400);
+    if (!isActingAs(c, driverEmail)) return c.json(FORBIDDEN_NOT_YOU, 403);
 
     const cargo: any = await kv.get(`ovora:cargo:${cargoId}`);
-    if (!cargo) return c.json({ error: "Cargo not found" }, 404);
+    if (!cargo || cargo.deletedAt) return c.json({ error: "Cargo not found" }, 404);
+    if (cargo.status !== 'active') return c.json({ error: "На этот груз уже нельзя откликнуться" }, 409);
+    if (cargo.senderEmail && String(cargo.senderEmail).toLowerCase().trim() === String(driverEmail).toLowerCase().trim()) {
+      return c.json({ error: "Нельзя откликнуться на свой груз" }, 400);
+    }
 
     // Prevent duplicate pending offer from same driver on same cargo
     const existingIdx: any[] = await kv.getByPrefix(`ovora:drivercargooffers:${driverEmail}:`);
@@ -2417,8 +2455,9 @@ app.post("/make-server-4e36197a/cargo-offers", async (c) => {
 
     const offerId = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     const now = new Date().toISOString();
+    const { callerEmail: _drop, acceptedAt: _a, cancelledAt: _cn, rejectedAt: _r, ...offerFields } = body;
     const offer = {
-      ...body, offerId, cargoId,
+      ...offerFields, offerId, cargoId,
       senderEmail: cargo.senderEmail || '', senderName: cargo.senderName || '',
       createdAt: now, updatedAt: now, status: 'pending',
     };
@@ -2463,6 +2502,7 @@ app.get("/make-server-4e36197a/cargo-offers/cargo/:cargoId", async (c) => {
 app.get("/make-server-4e36197a/cargo-offers/driver/:email", async (c) => {
   try {
     const email = decodeURIComponent(c.req.param("email"));
+    if (!isActingAs(c, email)) return c.json(FORBIDDEN_NOT_YOU, 403);
     const idx: any[] = await kv.getByPrefix(`ovora:drivercargooffers:${email}:`);
     let offers: any[] = [];
     if (idx.length > 0) {
@@ -2489,6 +2529,7 @@ app.get("/make-server-4e36197a/cargo-offers/driver/:email", async (c) => {
 app.get("/make-server-4e36197a/cargo-offers/sender/:email", async (c) => {
   try {
     const email = decodeURIComponent(c.req.param("email"));
+    if (!isActingAs(c, email)) return c.json(FORBIDDEN_NOT_YOU, 403);
     const idx: any[] = await kv.getByPrefix(`ovora:sendercargooffers:${email}:`);
     let offers: any[] = [];
     if (idx.length > 0) {
@@ -2823,7 +2864,8 @@ app.delete("/make-server-4e36197a/reviews/:reviewId", async (c) => {
 app.post("/make-server-4e36197a/chat/init", async (c) => {
   try {
     const body = await c.req.json();
-    const { chatId, participants, tripId, tripRoute, contactInfo, senderInfo, tripData, callerEmail } = body;
+    const { chatId, participants, tripId, tripRoute, contactInfo, senderInfo, tripData } = body;
+    const callerEmail = actingAs(c, body.callerEmail);
     if (!chatId) return c.json({ error: "chatId required" }, 400);
     if (!callerEmail) return c.json({ error: "callerEmail is required" }, 400);
     const metaKey = `ovora:chatmeta:${chatId}`;
@@ -3011,7 +3053,7 @@ app.post("/make-server-4e36197a/chat/message", async (c) => {
 app.get("/make-server-4e36197a/chat/:chatId/messages", async (c) => {
   try {
     const chatId = c.req.param("chatId");
-    const callerEmail = c.req.query("callerEmail");
+    const callerEmail = actingAs(c, c.req.query("callerEmail"));
     if (!callerEmail) return c.json({ error: "callerEmail query param required" }, 400);
 
     // IDOR fix: verify caller is a participant before exposing messages
@@ -3036,7 +3078,7 @@ app.get("/make-server-4e36197a/chat/:chatId/messages", async (c) => {
 app.put("/make-server-4e36197a/chat/:chatId/read", async (c) => {
   try {
     const chatId = c.req.param("chatId");
-    const { userEmail } = await c.req.json();
+    const userEmail = actingAs(c, (await c.req.json()).userEmail);
     if (!userEmail) return c.json({ error: "userEmail required" }, 400);
 
     const metaKey = `ovora:chatmeta:${chatId}`;
@@ -3406,6 +3448,7 @@ app.delete("/make-server-4e36197a/chats/cleanup-demo", requireAdminChecked, asyn
 app.put("/make-server-4e36197a/users/:email/sync-chats", async (c) => {
   try {
     const email = decodeURIComponent(c.req.param("email"));
+    if (!isActingAs(c, email)) return c.json(FORBIDDEN_NOT_YOU, 403);
     const body = await c.req.json();
     const { firstName, lastName, middleName, fullName, avatarUrl } = body;
 
@@ -3481,6 +3524,7 @@ app.put("/make-server-4e36197a/users/:email/sync-chats", async (c) => {
 app.put("/make-server-4e36197a/users/:email/sync-trips", async (c) => {
   try {
     const email = decodeURIComponent(c.req.param("email"));
+    if (!isActingAs(c, email)) return c.json(FORBIDDEN_NOT_YOU, 403);
     const body = await c.req.json();
     const { firstName, lastName, middleName, fullName, avatarUrl } = body;
 
@@ -3535,7 +3579,7 @@ app.delete("/make-server-4e36197a/chat/:chatId", async (c) => {
     const chatId = c.req.param("chatId");
     if (!chatId) return c.json({ error: "chatId required" }, 400);
 
-    const callerEmail = c.req.query("callerEmail");
+    const callerEmail = actingAs(c, c.req.query("callerEmail"));
     if (!callerEmail) return c.json({ error: "callerEmail query param required" }, 400);
 
     console.log(`[delete-chat] Deleting chat: ${chatId}`);
@@ -3630,7 +3674,7 @@ app.delete("/make-server-4e36197a/chat/:chatId/message/:msgId", async (c) => {
     const msgId = c.req.param("msgId");
     if (!chatId || !msgId) return c.json({ error: "chatId and msgId required" }, 400);
 
-    const callerEmail = c.req.query("callerEmail");
+    const callerEmail = actingAs(c, c.req.query("callerEmail"));
     if (!callerEmail) return c.json({ error: "callerEmail query param required" }, 400);
 
     // Only the message author may delete it
@@ -4687,7 +4731,7 @@ app.post("/make-server-4e36197a/documents/upload", async (c) => {
     const subtitle = formData.get('subtitle') as string;
     const expiryDate = formData.get('expiryDate') as string | null;
     const extractedFullName = formData.get('extractedFullName') as string | null; // ✅ ФИО из формы
-    const callerEmail = (formData.get('callerEmail') as string | null) || '';
+    const callerEmail = actingAs(c, formData.get('callerEmail'));
 
     if (!file || !userEmail || !documentId) {
       return c.json({ error: "file, userEmail and documentId required" }, 400);
@@ -5002,7 +5046,7 @@ app.post("/make-server-4e36197a/documents/upload", async (c) => {
 app.get("/make-server-4e36197a/documents/user/:email", async (c) => {
   try {
     const email = decodeURIComponent(c.req.param("email"));
-    const callerEmail = (c.req.query("callerEmail") || "").toLowerCase().trim();
+    const callerEmail = actingAs(c, c.req.query("callerEmail")).toLowerCase().trim();
     if (!callerEmail || callerEmail !== email.toLowerCase().trim()) {
       return c.json({ error: 'Forbidden' }, 403);
     }
@@ -5040,7 +5084,8 @@ app.put("/make-server-4e36197a/documents/:documentId", async (c) => {
   try {
     const documentId = c.req.param("documentId");
     const body = await c.req.json();
-    const { userEmail, callerEmail, ...updates } = body;
+    const { userEmail, callerEmail: _claimedCaller, ...updates } = body;
+    const callerEmail = actingAs(c, _claimedCaller);
 
     if (!userEmail) {
       return c.json({ error: "userEmail required" }, 400);
@@ -5093,7 +5138,8 @@ app.put("/make-server-4e36197a/documents/:documentId", async (c) => {
 app.delete("/make-server-4e36197a/documents/:documentId", async (c) => {
   try {
     const documentId = c.req.param("documentId");
-    const { userEmail, callerEmail } = await c.req.json();
+    const { userEmail, callerEmail: _claimedCaller } = await c.req.json();
+    const callerEmail = actingAs(c, _claimedCaller);
 
     if (!userEmail) {
       return c.json({ error: "userEmail required" }, 400);
@@ -5132,7 +5178,8 @@ app.delete("/make-server-4e36197a/documents/:documentId", async (c) => {
 app.post("/make-server-4e36197a/documents/analyze/:documentId", async (c) => {
   try {
     const documentId = c.req.param("documentId");
-    const { userEmail, callerEmail } = await c.req.json();
+    const { userEmail, callerEmail: _claimedCaller } = await c.req.json();
+    const callerEmail = actingAs(c, _claimedCaller);
 
     if (!userEmail) {
       return c.json({ error: "userEmail required" }, 400);
@@ -5956,6 +6003,7 @@ app.get("/make-server-4e36197a/admin/audit", async (c) => {
 app.get("/make-server-4e36197a/tracking/user/:email", async (c) => {
   try {
     const email = decodeURIComponent(c.req.param("email"));
+    if (!isActingAs(c, email)) return c.json(FORBIDDEN_NOT_YOU, 403);
     const role = c.req.query("role") as 'driver' | 'sender' | undefined;
     const values: any[] = await kv.getByPrefix("ovora:shipment:");
     const filtered = values
@@ -5977,7 +6025,7 @@ app.get("/make-server-4e36197a/tracking/user/:email", async (c) => {
 app.get("/make-server-4e36197a/tracking/:tripId", async (c) => {
   try {
     const tripId = c.req.param("tripId");
-    const callerEmail = (c.req.query("callerEmail") || "").toLowerCase().trim();
+    const callerEmail = actingAs(c, c.req.query("callerEmail")).toLowerCase().trim();
     if (!callerEmail) return c.json({ error: "callerEmail is required" }, 400);
 
     const value: any = await kv.get(`ovora:shipment:${tripId}`);
@@ -6074,7 +6122,8 @@ const CARGO_STATUS_LABELS: Record<string, string> = {
 app.post("/make-server-4e36197a/tracking/:tripId/status", async (c) => {
   try {
     const tripId = c.req.param("tripId");
-    const { status, driverEmail } = await c.req.json();
+    const { status, driverEmail: _claimedDriver } = await c.req.json();
+    const driverEmail = actingAs(c, _claimedDriver);
     if (!status) return c.json({ error: 'status required' }, 400);
     if (!driverEmail) return c.json({ error: 'driverEmail is required' }, 400);
 
@@ -6142,7 +6191,8 @@ app.post("/make-server-4e36197a/tracking/:tripId/pod",
   async (c) => {
   try {
     const tripId = c.req.param("tripId");
-    const { base64, type, driverEmail } = await c.req.json();
+    const { base64, type, driverEmail: _claimedDriver } = await c.req.json();
+    const driverEmail = actingAs(c, _claimedDriver);
     if (!base64 || !type) return c.json({ error: 'base64 and type required' }, 400);
     if (!['loading', 'unloading'].includes(type)) return c.json({ error: 'type must be loading or unloading' }, 400);
     if (!driverEmail) return c.json({ error: 'driverEmail is required' }, 400);
@@ -6348,6 +6398,9 @@ app.post(
     if (!userEmail || !type || !title) {
       return c.json({ error: "userEmail, type, and title are required" }, 400);
     }
+    // Клиент создаёт уведомления только себе (EmailAuth.tsx). Иначе любой отправил бы
+    // другому человеку поддельное «оплатите на карту» от имени платформы.
+    if (!isActingAs(c, userEmail)) return c.json(FORBIDDEN_NOT_YOU, 403);
     if (!NOTIFICATION_TYPES.has(type)) {
       return c.json({ error: "Invalid notification type" }, 400);
     }
@@ -6383,6 +6436,7 @@ app.post(
 app.get("/make-server-4e36197a/notifications/:email", async (c) => {
   try {
     const email = decodeURIComponent(c.req.param("email"));
+    if (!isActingAs(c, email)) return c.json(FORBIDDEN_NOT_YOU, 403);
     const notifications: any[] = await kv.getByPrefix(`ovora:notification:${email}:`);
     const sorted = notifications
       .filter(n => n)
@@ -6397,6 +6451,7 @@ app.get("/make-server-4e36197a/notifications/:email", async (c) => {
 app.put("/make-server-4e36197a/notifications/:email/:id/read", async (c) => {
   try {
     const email = decodeURIComponent(c.req.param("email"));
+    if (!isActingAs(c, email)) return c.json(FORBIDDEN_NOT_YOU, 403);
     const id = c.req.param("id");
     const key = `ovora:notification:${email}:${id}`;
     const existing: any = await kv.get(key);
@@ -6413,6 +6468,7 @@ app.put("/make-server-4e36197a/notifications/:email/:id/read", async (c) => {
 app.put("/make-server-4e36197a/notifications/:email/read-all", async (c) => {
   try {
     const email = decodeURIComponent(c.req.param("email"));
+    if (!isActingAs(c, email)) return c.json(FORBIDDEN_NOT_YOU, 403);
     const notifications: any[] = await kv.getByPrefix(`ovora:notification:${email}:`);
     for (const n of notifications) {
       if (n && n.isUnread) {
@@ -6429,6 +6485,7 @@ app.put("/make-server-4e36197a/notifications/:email/read-all", async (c) => {
 app.delete("/make-server-4e36197a/notifications/:email/:id", async (c) => {
   try {
     const email = decodeURIComponent(c.req.param("email"));
+    if (!isActingAs(c, email)) return c.json(FORBIDDEN_NOT_YOU, 403);
     const id = c.req.param("id");
     await kv.del(`ovora:notification:${email}:${id}`);
     return c.json({ success: true });
@@ -6441,6 +6498,7 @@ app.delete("/make-server-4e36197a/notifications/:email/:id", async (c) => {
 app.delete("/make-server-4e36197a/notifications/:email", async (c) => {
   try {
     const email = decodeURIComponent(c.req.param("email"));
+    if (!isActingAs(c, email)) return c.json(FORBIDDEN_NOT_YOU, 403);
     const notifications: any[] = await kv.getByPrefix(`ovora:notification:${email}:`);
     for (const n of notifications) {
       if (n && n.id) {
@@ -6489,7 +6547,8 @@ app.put("/make-server-4e36197a/users/:email", async (c) => {
   try {
     const email = decodeURIComponent(c.req.param("email"));
     const body = await c.req.json();
-    const { callerEmail, ...rawUpdates } = body as any;
+    const { callerEmail: _claimedCaller, ...rawUpdates } = body as any;
+    const callerEmail = actingAs(c, _claimedCaller);
     if (!callerEmail) return c.json({ error: "callerEmail is required" }, 400);
     if (callerEmail.toLowerCase().trim() !== email.toLowerCase().trim()) {
       console.warn(`[users/update] IDOR attempt: ${callerEmail} tried to update ${email}`);
@@ -6539,7 +6598,7 @@ app.post("/make-server-4e36197a/users/:email/avatar", async (c) => {
 
     const form = await c.req.formData();
     const file = form.get("avatar") as File | null;
-    const callerEmail = String(form.get("callerEmail") || "").toLowerCase().trim();
+    const callerEmail = actingAs(c, form.get("callerEmail")).toLowerCase().trim();
 
     if (!callerEmail) return c.json({ error: "callerEmail is required" }, 400);
     if (callerEmail !== email) {
@@ -6754,7 +6813,7 @@ app.delete("/make-server-4e36197a/admin/ads/:id", requireAdminChecked, async (c)
 app.get("/make-server-4e36197a/payments/:email", async (c) => {
   try {
     const email = decodeURIComponent(c.req.param("email")).toLowerCase().trim();
-    const callerEmail = (c.req.query("callerEmail") || "").toLowerCase().trim();
+    const callerEmail = actingAs(c, c.req.query("callerEmail")).toLowerCase().trim();
     if (!callerEmail || callerEmail !== email) {
       return c.json({ error: 'Forbidden' }, 403);
     }

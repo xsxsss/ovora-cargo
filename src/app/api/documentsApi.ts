@@ -1,5 +1,6 @@
 import { projectId, publicAnonKey } from '../../../utils/supabase/info';
 import { CSRF_HEADER, CSRF_TOKEN } from './csrfToken';
+import { withUserToken } from './userToken';
 
 const BASE = `https://${projectId}.supabase.co/functions/v1/make-server-4e36197a`;
 const HEADERS = {
@@ -60,9 +61,10 @@ export async function uploadDocument(params: {
 
   const res = await fetch(`${BASE}/documents/upload`, {
     method: 'POST',
-    headers: {
+    headers: withUserToken({
       Authorization: `Bearer ${publicAnonKey}`,
-    },
+      [CSRF_HEADER]: CSRF_TOKEN,
+    }),
     body: formData,
   });
 
@@ -95,7 +97,7 @@ export async function getUserDocuments(userEmail: string): Promise<Document[]> {
       const timeoutId = setTimeout(() => controller.abort(), 15000); // 15s timeout
 
       const res = await fetch(`${BASE}/documents/user/${encodeURIComponent(userEmail)}?callerEmail=${encodeURIComponent(userEmail)}`, {
-        headers: HEADERS,
+        headers: withUserToken(HEADERS),
         signal: controller.signal,
       });
       clearTimeout(timeoutId);
@@ -134,7 +136,7 @@ export async function updateDocument(
 ): Promise<Document> {
   const res = await fetch(`${BASE}/documents/${documentId}`, {
     method: 'PUT',
-    headers: HEADERS,
+    headers: withUserToken(HEADERS),
     body: JSON.stringify({ userEmail, callerEmail: userEmail, ...updates }),
   });
 
@@ -155,7 +157,7 @@ export async function updateDocument(
 export async function deleteDocument(documentId: string, userEmail: string): Promise<void> {
   const res = await fetch(`${BASE}/documents/${documentId}`, {
     method: 'DELETE',
-    headers: HEADERS,
+    headers: withUserToken(HEADERS),
     body: JSON.stringify({ userEmail, callerEmail: userEmail }),
   });
 
@@ -174,7 +176,7 @@ export async function deleteDocument(documentId: string, userEmail: string): Pro
 export async function analyzeDocument(documentId: string, userEmail: string): Promise<number> {
   const res = await fetch(`${BASE}/documents/analyze/${documentId}`, {
     method: 'POST',
-    headers: HEADERS,
+    headers: withUserToken(HEADERS),
     body: JSON.stringify({ userEmail, callerEmail: userEmail }),
   });
 

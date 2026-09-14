@@ -1,5 +1,6 @@
 import { projectId, publicAnonKey } from '../../../utils/supabase/info';
 import { CSRF_HEADER, CSRF_TOKEN } from './csrfToken';
+import { userTokenHeader } from './userToken';
 
 const BASE = `https://${projectId}.supabase.co/functions/v1/make-server-4e36197a`;
 
@@ -54,10 +55,7 @@ function getHeaders(path: string, isFormData: boolean): Record<string, string> {
   } else if (typeof localStorage !== 'undefined') {
     // Сессионный токен пользователя (X-User-Token). Активируется, когда бэкенд
     // настроен с USER_JWT_SECRET; иначе токена нет и бэкенд работает в legacy-режиме.
-    try {
-      const userToken = localStorage.getItem('ovora_user_token');
-      if (userToken) headers['X-User-Token'] = userToken;
-    } catch { /* ignore */ }
+    Object.assign(headers, userTokenHeader());
   }
   return headers;
 }
