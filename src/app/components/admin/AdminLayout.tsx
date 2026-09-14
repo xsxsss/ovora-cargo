@@ -7,7 +7,6 @@ import {
   Crown, Globe, Boxes, Plane, History, ShieldOff,
   KeyRound, SlidersHorizontal, MessageCircle,
 } from 'lucide-react';
-import { YandexMetrikaTracker } from '../YandexMetrika';
 import { getAdminStats, searchAdmin, revokeAllAdminSessions } from '../../api/dataApi';
 import { usePolling } from '../../hooks/usePolling';
 import { AdminAuthGate } from './AdminAuthGate';
@@ -326,8 +325,8 @@ export function AdminLayout() {
   const notifTotal = (stats?.pendingOffers || 0) + (stats?.recentReviews || 0);
 
   return (
-    <div className="min-h-screen bg-[#f1f5f9]">
-      <YandexMetrikaTracker />
+    // ym-hide-content: Вебвизор Метрики не записывает экраны с данными клиентов
+    <div className="min-h-screen bg-[#f1f5f9] ym-hide-content">
 
       <AdminIdleWarning secs={idleWarningSecs} onStay={() => resetIdleRef.current()} />
 

@@ -5,7 +5,7 @@ interface ImportMetaEnv {
   readonly VITE_SUPABASE_PROJECT_ID?: string;
   readonly VITE_SUPABASE_ANON_KEY?: string;
   readonly VITE_SENTRY_DSN?: string;
-  readonly VITE_RYBBIT_SITE_ID?: string;
+  readonly VITE_YANDEX_METRIKA_ID?: string;
 }
 
 interface ImportMeta {
@@ -16,11 +16,6 @@ interface ImportMeta {
 declare module '/utils/supabase/info' {
   export const projectId: string;
   export const publicAnonKey: string;
-}
-
-// Yandex Metrica global
-interface Window {
-  ym?: (counterId: number, method: string, ...args: unknown[]) => void;
 }
 
 // Firebase module stubs (firebase package not installed; suppress TS errors)

@@ -7,7 +7,7 @@ import { LanguageProvider } from './context/LanguageContext';
 import { UserProvider } from './contexts/UserContext';
 import { TripsProvider } from './contexts/TripsContext';
 import { AviaProvider } from './components/avia/AviaContext';
-import { YandexMetrika } from './components/YandexMetrika';
+import { initYandexMetrika } from './config/yandexMetrika';
 import { initYandexApiKey } from './config/yandex';
 import { projectId, publicAnonKey } from '../../utils/supabase/info';
 
@@ -35,6 +35,8 @@ function _AppLoadingFallback() {
     </div>
   );
 }
+
+initYandexMetrika(router);
 
 export default function App() {
   useEffect(() => {
@@ -104,7 +106,6 @@ export default function App() {
                 }}
                 richColors
               />
-              <YandexMetrika />
             </AviaProvider>
           </TripsProvider>
         </UserProvider>

@@ -16,6 +16,7 @@ import { RootLayout }   from "./components/RootLayout";
 
 // Error pages (Eager — must render even when chunks fail to load)
 import { ErrorPage } from "./components/ErrorPage";
+import { hiddenFromWebvisor } from "./components/HiddenFromWebvisor";
 
 // AviaErrorBoundary MUST be eager — React Router instantiates ErrorBoundary
 // synchronously when an error occurs; a lazy() here causes a second suspend
@@ -139,17 +140,17 @@ export const router = createBrowserRouter([
           {
             path: "/avia/profile",
             lazy: () => import("./components/avia/AviaProfile")
-              .then(m => ({ Component: m.AviaProfile })),
+              .then(m => ({ Component: hiddenFromWebvisor(m.AviaProfile) })),
           },
           {
             path: "/avia/deals",
             lazy: () => import("./components/avia/AviaDealsPage")
-              .then(m => ({ Component: m.AviaDealsPage })),
+              .then(m => ({ Component: hiddenFromWebvisor(m.AviaDealsPage) })),
           },
           {
             path: "/avia/messages",
             lazy: () => import("./components/avia/AviaMessagesPage")
-              .then(m => ({ Component: m.AviaMessagesPage })),
+              .then(m => ({ Component: hiddenFromWebvisor(m.AviaMessagesPage) })),
           },
           {
             path: "/avia/user/:phone",
@@ -159,7 +160,7 @@ export const router = createBrowserRouter([
           {
             path: "/avia/flight/:id/manifest",
             lazy: () => import("./components/avia/AviaFlightManifestPage")
-              .then(m => ({ Component: m.AviaFlightManifestPage })),
+              .then(m => ({ Component: hiddenFromWebvisor(m.AviaFlightManifestPage) })),
           },
         ],
       },
@@ -213,12 +214,12 @@ export const router = createBrowserRouter([
           {
             path: "messages",
             lazy: () => import("./components/messages/MessagesPage")
-              .then(m => ({ Component: m.MessagesPage })),
+              .then(m => ({ Component: hiddenFromWebvisor(m.MessagesPage) })),
           },
           {
             path: "chat/:id",
             lazy: () => import("./components/ChatPage")
-              .then(m => ({ Component: m.ChatPage })),
+              .then(m => ({ Component: hiddenFromWebvisor(m.ChatPage) })),
           },
           {
             path: "profile",
@@ -228,7 +229,7 @@ export const router = createBrowserRouter([
           {
             path: "profile/edit",
             lazy: () => import("./components/EditProfile")
-              .then(m => ({ Component: m.EditProfile })),
+              .then(m => ({ Component: hiddenFromWebvisor(m.EditProfile) })),
           },
           {
             path: "notifications",
@@ -238,7 +239,7 @@ export const router = createBrowserRouter([
           {
             path: "payments",
             lazy: () => import("./components/PaymentHistory")
-              .then(m => ({ Component: m.PaymentHistory })),
+              .then(m => ({ Component: hiddenFromWebvisor(m.PaymentHistory) })),
           },
           {
             path: "reviews",
@@ -248,7 +249,7 @@ export const router = createBrowserRouter([
           {
             path: "documents",
             lazy: () => import("./components/DocumentVerificationPage")
-              .then(m => ({ Component: m.DocumentVerificationPage })),
+              .then(m => ({ Component: hiddenFromWebvisor(m.DocumentVerificationPage) })),
           },
           {
             path: "settings",
