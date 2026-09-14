@@ -16,7 +16,8 @@ import {
 import { rateLimitMiddleware, RL } from "./rateLimit.tsx";
 import { calculateAverageRating, recalculateRating } from "./rating.tsx";
 import * as kv from "./kv_store.tsx";
-import { setIfUnchanged } from "./kv_store.tsx";
+import * as capacity from "./capacity.tsx";
+import { FINAL_OFFER_STATUSES, type OfferCounts } from "./capacity.tsx";
 import { Blacklist } from "./blacklist.tsx";
 import { AuditLog as CargoAuditLog } from "./cargoAudit.tsx";
 import { AuditLog as AviaAuditLog } from "./aviaAudit.tsx";
@@ -47,79 +48,29 @@ function generatePairChatId(emailA: string, emailB: string): string {
   return `pair_${generateEmailHash(sorted[0])}_${generateEmailHash(sorted[1])}`;
 }
 
-// ── Trip capacity accounting (W2) ───────────────────────────────────────────
-// Analog of adjustFlightCapacity from AVIA. Uses setIfUnchanged for atomic
-// conditional writes — prevents double-booking from concurrent accepts.
-async function adjustTripCapacity(
-  tripId: string,
-  offer: { requestedSeats?: number; requestedChildren?: number; requestedCargo?: number },
-  direction: -1 | 1,
-  maxRetries = 3,
-): Promise<'ok' | 'insufficient' | 'conflict' | 'not_found'> {
-  for (let attempt = 0; attempt < maxRetries; attempt++) {
-    const trip: any = await kv.get(`ovora:trip:${tripId}`);
-    if (!trip) return 'not_found';
-
-    const seats    = offer.requestedSeats    || 0;
-    const children  = offer.requestedChildren || 0;
-    const cargo    = offer.requestedCargo    || 0;
-
-    if (direction === -1) {
-      if (seats    > (trip.availableSeats || 0) ||
-          children > (trip.childSeats    || 0) ||
-          cargo    > (trip.cargoCapacity || 0)) {
-        return 'insufficient';
-      }
-    }
-
-    const expectedUpdatedAt = trip.updatedAt || null;
-    const next = {
-      ...trip,
-      updatedAt: new Date().toISOString(),
-      availableSeats: Math.max(0, (trip.availableSeats || 0) + direction * seats),
-      childSeats:     Math.max(0, (trip.childSeats    || 0) + direction * children),
-      cargoCapacity:  Math.max(0, (trip.cargoCapacity || 0) + direction * cargo),
-    };
-
-    const written = await setIfUnchanged(`ovora:trip:${tripId}`, expectedUpdatedAt, next);
-    if (written) return 'ok';
-  }
-  return 'conflict';
+// ── Учёт мест и замок груза — логика и тесты в capacity.tsx ─────────────────
+function adjustTripCapacity(tripId: string, offer: OfferCounts, direction: -1 | 1, maxRetries = 3) {
+  return capacity.adjustTripCapacity(kv, tripId, offer, direction, maxRetries);
 }
 
-// Retry wrapper for capacity restore — more retries (5) + logging on failure.
-// Used when rejecting/cancelling an already-accepted offer (points B, D, E, F).
-async function restoreTripCapacity(
-  tripId: string,
-  offer: { requestedSeats?: number; requestedChildren?: number; requestedCargo?: number },
-  context: string,
-): Promise<void> {
+// Возврат мест после отказа: сообщить пользователю об ошибке уже нельзя, поэтому
+// больше попыток и запись в лог для ручного разбора.
+async function restoreTripCapacity(tripId: string, offer: OfferCounts, context: string): Promise<void> {
   const result = await adjustTripCapacity(tripId, offer, 1, 5);
   if (result !== 'ok') {
     console.error(`[CAPACITY RESTORE FAILED] ${context}: tripId=${tripId}, result=${result}, offer=${JSON.stringify(offer)}`);
   }
 }
 
-// Atomic cargo status transition. Re-reads the cargo on every attempt so a lost
-// race is retried against fresh updatedAt instead of the same stale value.
-async function transitionCargoStatus(
-  cargoId: string,
-  from: string,
-  to: string,
-  maxRetries: number,
-): Promise<'ok' | 'wrong_status' | 'conflict' | 'not_found'> {
-  for (let attempt = 0; attempt < maxRetries; attempt++) {
-    const cargo: any = await kv.get(`ovora:cargo:${cargoId}`);
-    if (!cargo) return 'not_found';
-    if (cargo.status !== from) return 'wrong_status';
-    const written = await setIfUnchanged(
-      `ovora:cargo:${cargoId}`,
-      cargo.updatedAt || null,
-      { ...cargo, status: to, updatedAt: new Date().toISOString() },
-    );
-    if (written) return 'ok';
-  }
-  return 'conflict';
+const CAPACITY_ERRORS = {
+  insufficient: [409, 'INSUFFICIENT_CAPACITY: not enough seats/cargo capacity left on this trip'],
+  closed: [409, 'TRIP_CLOSED: this trip is cancelled or completed'],
+  not_found: [404, 'Trip not found'],
+  conflict: [503, 'CAPACITY_CONFLICT: try again'],
+} as const;
+
+function transitionCargoStatus(cargoId: string, from: string, to: string, maxRetries: number) {
+  return capacity.transitionCargoStatus(kv, cargoId, from, to, maxRetries);
 }
 
 async function releaseCargo(cargoId: string, context: string): Promise<void> {
@@ -129,9 +80,11 @@ async function releaseCargo(cargoId: string, context: string): Promise<void> {
   }
 }
 
-// ── Каскады отмены ──────────────────────────────────────────────────────────
-const FINAL_OFFER_STATUSES = ['cancelled', 'declined', 'deleted', 'rejected'];
+function patchRecord(key: string, patch: (current: any) => Record<string, unknown> | null, maxRetries = 3) {
+  return capacity.patchRecord(kv, key, patch, maxRetries);
+}
 
+// ── Каскады отмены ──────────────────────────────────────────────────────────
 async function notifyCancellation(to: string, title: string, description: string): Promise<void> {
   const id = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   await kv.set(`ovora:notification:${to}:${id}`, {
@@ -141,16 +94,35 @@ async function notifyCancellation(to: string, title: string, description: string
   }).catch(() => {});
 }
 
-/** Отменяет оффер на поездку: возврат мест для принятого, статус, индексы. */
-async function cancelTripOffer(tripId: string, offer: any, context: string): Promise<void> {
-  if (offer.status === 'accepted') {
-    await restoreTripCapacity(tripId, offer, `${context}/${offer.offerId}`);
+const LIVE_OFFER_STATUSES = ['pending', 'accepted'];
+
+function transitionOffer(key: string, allowedFrom: string[], to: string, extra: Record<string, unknown> = {}, maxRetries = 3) {
+  return capacity.transitionRecordStatus(kv, key, allowedFrom, to, extra, maxRetries);
+}
+
+/**
+ * Отменяет оффер на поездку: условная смена статуса, возврат мест, если он был принят, индексы.
+ * Возвращает статус, из которого оффер отменён, или null — если его уже закрыли другим запросом.
+ */
+async function cancelTripOffer(tripId: string, offer: any, context: string, extra: Record<string, unknown> = {}): Promise<string | null> {
+  const t = await transitionOffer(`ovora:offer:${tripId}:${offer.offerId}`, LIVE_OFFER_STATUSES, 'cancelled',
+    { cancelledAt: new Date().toISOString(), ...extra }, 5);
+  if (t.result !== 'ok') return null;
+  if (t.previous.status === 'accepted') {
+    await restoreTripCapacity(tripId, t.previous, `${context}/${offer.offerId}`);
   }
-  await kv.set(`ovora:offer:${tripId}:${offer.offerId}`, {
-    ...offer, status: 'cancelled', cancelledAt: new Date().toISOString(),
-  });
-  if (offer.driverEmail) await kv.del(`ovora:driveroffers:${offer.driverEmail}:${offer.offerId}`).catch(() => {});
-  if (offer.senderEmail) await kv.del(`ovora:senderoffers:${offer.senderEmail}:${offer.offerId}`).catch(() => {});
+  if (t.previous.driverEmail) await kv.del(`ovora:driveroffers:${t.previous.driverEmail}:${offer.offerId}`).catch(() => {});
+  if (t.previous.senderEmail) await kv.del(`ovora:senderoffers:${t.previous.senderEmail}:${offer.offerId}`).catch(() => {});
+  return t.previous.status;
+}
+
+// Поездку могли отменить между списанием мест и записью «принято»: каскад отмены к тому
+// моменту уже прошёл и этот оффер не увидел. Проверяем после записи и откатываем сами.
+async function undoAcceptIfTripClosed(tripId: string, acceptedOffer: any): Promise<boolean> {
+  const trip: any = await kv.get(`ovora:trip:${tripId}`);
+  if (!capacity.isTripClosed(trip)) return false;
+  await cancelTripOffer(tripId, acceptedOffer, 'accept-after-trip-closed');
+  return true;
 }
 
 /** Отмена поездки водителем: все живые офферы отменяются, отправители уведомляются. */
@@ -159,7 +131,7 @@ async function cancelAllTripOffers(tripId: string, trip: any): Promise<number> {
   let n = 0;
   for (const offer of offers) {
     if (!offer?.offerId || FINAL_OFFER_STATUSES.includes(offer.status)) continue;
-    await cancelTripOffer(tripId, offer, 'trip-cancel');
+    if (!(await cancelTripOffer(tripId, offer, 'trip-cancel'))) continue;
     if (offer.senderEmail) {
       await notifyCancellation(offer.senderEmail, 'Поездка отменена',
         `Водитель отменил поездку ${trip?.from || ''} → ${trip?.to || ''}`);
@@ -169,18 +141,25 @@ async function cancelAllTripOffers(tripId: string, trip: any): Promise<number> {
   return n;
 }
 
+/** Отменяет отклик на груз. Возвращает статус, из которого отменён, или null. */
+async function cancelCargoOffer(cargoId: string, offerId: string): Promise<{ previous: string; offer: any } | null> {
+  const t = await transitionOffer(`ovora:cargo-offer:${cargoId}:${offerId}`, LIVE_OFFER_STATUSES, 'cancelled',
+    { cancelledAt: new Date().toISOString() }, 5);
+  if (t.result !== 'ok') return null;
+  if (t.previous.driverEmail) await kv.del(`ovora:drivercargooffers:${t.previous.driverEmail}:${offerId}`).catch(() => {});
+  if (t.previous.senderEmail) await kv.del(`ovora:sendercargooffers:${t.previous.senderEmail}:${offerId}`).catch(() => {});
+  return { previous: t.previous.status, offer: t.previous };
+}
+
 /** Отменяет все живые офферы на груз (груз снят). Водителей с принятым откликом уведомляет. */
 async function cancelCargoOffers(cargoId: string, cargo: any, skipNotify?: string): Promise<number> {
   const offers: any[] = await kv.getByPrefix(`ovora:cargo-offer:${cargoId}:`);
   let n = 0;
   for (const co of offers) {
     if (!co?.offerId || FINAL_OFFER_STATUSES.includes(co.status)) continue;
-    await kv.set(`ovora:cargo-offer:${cargoId}:${co.offerId}`, {
-      ...co, status: 'cancelled', cancelledAt: new Date().toISOString(),
-    });
-    if (co.driverEmail) await kv.del(`ovora:drivercargooffers:${co.driverEmail}:${co.offerId}`).catch(() => {});
-    if (co.senderEmail) await kv.del(`ovora:sendercargooffers:${co.senderEmail}:${co.offerId}`).catch(() => {});
-    if (co.status === 'accepted' && co.driverEmail && co.driverEmail !== skipNotify) {
+    const cancelled = await cancelCargoOffer(cargoId, co.offerId);
+    if (!cancelled) continue;
+    if (cancelled.previous === 'accepted' && co.driverEmail && co.driverEmail !== skipNotify) {
       await notifyCancellation(co.driverEmail, 'Груз снят',
         `Отправитель снял груз ${cargo?.from || ''} → ${cargo?.to || ''}. Перевозка отменена`);
     }
@@ -202,19 +181,21 @@ async function cascadeDeletedUser(email: string): Promise<Record<string, number>
   const driverTrips: any[] = await kv.getByPrefix(`ovora:drivertrips:${email}:`);
   for (const entry of driverTrips) {
     if (!entry?.tripId) continue;
-    const trip: any = await kv.get(`ovora:trip:${entry.tripId}`);
-    if (trip && !trip.deletedAt && trip.status !== 'cancelled') {
-      await kv.set(`ovora:trip:${entry.tripId}`, { ...trip, status: 'cancelled', deletedAt: now });
-      counts.trips++;
-      const tripOffers: any[] = await kv.getByPrefix(`ovora:offer:${entry.tripId}:`);
-      for (const offer of tripOffers) {
-        if (!offer?.offerId || FINAL_OFFER_STATUSES.includes(offer.status)) continue;
-        await cancelTripOffer(entry.tripId, offer, 'user-delete');
-        counts.tripOffers++;
-        if (offer.senderEmail && offer.senderEmail !== email) {
-          await notifyCancellation(offer.senderEmail, 'Поездка отменена',
-            `Поездка ${trip.from || ''} → ${trip.to || ''} отменена: водитель больше не работает на платформе`);
-        }
+    const write = await patchRecord(`ovora:trip:${entry.tripId}`,
+      t => (t.deletedAt ? null : { status: 'cancelled', deletedAt: now }), 5);
+    // Индекс оставляем, если отменить не удалось: повторный запуск доделает.
+    if (write.result === 'conflict') { console.error(`[user-delete] trip ${entry.tripId} not cancelled`); continue; }
+    if (write.result === 'ok') counts.trips++;
+    const trip = write.record;
+    // Офферы отменяем и у уже отменённой поездки — прошлый запуск мог упасть на середине.
+    const tripOffers: any[] = trip ? await kv.getByPrefix(`ovora:offer:${entry.tripId}:`) : [];
+    for (const offer of tripOffers) {
+      if (!offer?.offerId || FINAL_OFFER_STATUSES.includes(offer.status)) continue;
+      if (!(await cancelTripOffer(entry.tripId, offer, 'user-delete'))) continue;
+      counts.tripOffers++;
+      if (offer.senderEmail && offer.senderEmail !== email) {
+        await notifyCancellation(offer.senderEmail, 'Поездка отменена',
+          `Поездка ${trip.from || ''} → ${trip.to || ''} отменена: водитель больше не работает на платформе`);
       }
     }
     await kv.del(`ovora:drivertrips:${email}:${entry.tripId}`).catch(() => {});
@@ -225,10 +206,10 @@ async function cascadeDeletedUser(email: string): Promise<Record<string, number>
   for (const entry of senderOffers) {
     if (!entry?.tripId || !entry?.offerId) continue;
     const offer: any = await kv.get(`ovora:offer:${entry.tripId}:${entry.offerId}`);
-    if (offer && !FINAL_OFFER_STATUSES.includes(offer.status)) {
-      await cancelTripOffer(entry.tripId, offer, 'user-delete');
+    const previous = offer ? await cancelTripOffer(entry.tripId, offer, 'user-delete') : null;
+    if (previous) {
       counts.tripOffers++;
-      if (offer.status === 'accepted' && offer.driverEmail && offer.driverEmail !== email) {
+      if (previous === 'accepted' && offer.driverEmail && offer.driverEmail !== email) {
         await notifyCancellation(offer.driverEmail, 'Бронь отменена',
           `Отправитель ${offer.senderName || ''} больше не на платформе. Места освобождены`);
       }
@@ -240,12 +221,10 @@ async function cascadeDeletedUser(email: string): Promise<Record<string, number>
   const driverCargoOffers: any[] = await kv.getByPrefix(`ovora:drivercargooffers:${email}:`);
   for (const entry of driverCargoOffers) {
     if (!entry?.cargoId || !entry?.offerId) continue;
-    const coKey = `ovora:cargo-offer:${entry.cargoId}:${entry.offerId}`;
-    const co: any = await kv.get(coKey);
-    if (co && !FINAL_OFFER_STATUSES.includes(co.status)) {
-      await kv.set(coKey, { ...co, status: 'cancelled', cancelledAt: now });
-      if (co.senderEmail) await kv.del(`ovora:sendercargooffers:${co.senderEmail}:${entry.offerId}`).catch(() => {});
-      if (co.status === 'accepted') {
+    const cancelled = await cancelCargoOffer(entry.cargoId, entry.offerId);
+    if (cancelled) {
+      const co = cancelled.offer;
+      if (cancelled.previous === 'accepted') {
         await releaseCargo(entry.cargoId, `user-delete/${entry.offerId}`);
         if (co.senderEmail && co.senderEmail !== email) {
           await notifyCancellation(co.senderEmail, 'Водитель выбыл',
@@ -261,12 +240,11 @@ async function cascadeDeletedUser(email: string): Promise<Record<string, number>
   const senderCargos: any[] = await kv.getByPrefix(`ovora:sendercargos:${email}:`);
   for (const entry of senderCargos) {
     if (!entry?.cargoId) continue;
-    const cargo: any = await kv.get(`ovora:cargo:${entry.cargoId}`);
-    if (cargo && !cargo.deletedAt) {
-      await kv.set(`ovora:cargo:${entry.cargoId}`, { ...cargo, status: 'cancelled', deletedAt: now, updatedAt: now });
-      counts.cargos++;
-      counts.cargoOffers += await cancelCargoOffers(entry.cargoId, cargo, email);
-    }
+    const write = await patchRecord(`ovora:cargo:${entry.cargoId}`,
+      cg => (cg.deletedAt ? null : { status: 'cancelled', deletedAt: now }), 5);
+    if (write.result === 'conflict') { console.error(`[user-delete] cargo ${entry.cargoId} not cancelled`); continue; }
+    if (write.result === 'ok') counts.cargos++;
+    if (write.record) counts.cargoOffers += await cancelCargoOffers(entry.cargoId, write.record, email);
     await kv.del(`ovora:sendercargos:${email}:${entry.cargoId}`).catch(() => {});
   }
 
@@ -1526,7 +1504,7 @@ app.put("/make-server-4e36197a/trips/:id", async (c) => {
     const id = c.req.param("id");
     const body = await c.req.json();
     const existing: any = await kv.get(`ovora:trip:${id}`);
-    if (!existing) return c.json({ error: "Trip not found" }, 404);
+    if (!existing || existing.deletedAt) return c.json({ error: "Trip not found" }, 404);
 
     // ✅ FIX C-2: проверка владельца (пропускаем для admin-оверрайда — X-Admin-Code или JWT)
     const isAdmin = await isAdminCaller(c, isAdminJwtRevoked);
@@ -1588,8 +1566,6 @@ app.put("/make-server-4e36197a/trips/:id", async (c) => {
       cleanedBody.to = cleanAddress(String(cleanedBody.to));
     }
 
-    const updated: any = { ...existing, ...cleanedBody, id, updatedAt: new Date().toISOString() };
-
     console.log(`[PUT /trips/${id}] Updating trip:`, {
       from: { original: body.from, cleaned: cleanedBody.from },
       to: { original: body.to, cleaned: cleanedBody.to },
@@ -1597,17 +1573,15 @@ app.put("/make-server-4e36197a/trips/:id", async (c) => {
 
     // Условная запись: обычный kv.set затёр бы списание мест, сделанное параллельным
     // принятием оффера между нашим чтением и записью.
-    let written = await setIfUnchanged(`ovora:trip:${id}`, existing.updatedAt || null, updated);
-    for (let attempt = 1; !written && attempt < 3; attempt++) {
-      const fresh: any = await kv.get(`ovora:trip:${id}`);
-      if (!fresh) return c.json({ error: "Trip not found" }, 404);
-      if (body.status && fresh.status !== existing.status) {
-        return c.json({ error: "Поездка изменилась, обновите страницу" }, 409);
-      }
-      Object.assign(updated, fresh, cleanedBody, { id, updatedAt: new Date().toISOString() });
-      written = await setIfUnchanged(`ovora:trip:${id}`, fresh.updatedAt || null, updated);
-    }
-    if (!written) return c.json({ error: "CONFLICT: try again" }, 503);
+    let statusMoved = false;
+    const write = await patchRecord(`ovora:trip:${id}`, (fresh) => {
+      if (body.status && fresh.status !== existing.status) { statusMoved = true; return null; }
+      return { ...cleanedBody, id };
+    });
+    if (write.result === 'not_found') return c.json({ error: "Trip not found" }, 404);
+    if (statusMoved) return c.json({ error: "Поездка изменилась, обновите страницу" }, 409);
+    if (write.result !== 'ok') return c.json({ error: "CONFLICT: try again" }, 503);
+    const updated: any = write.record;
 
     if (updated.status === 'cancelled' && existing.status !== 'cancelled') {
       await cancelAllTripOffers(id, updated);
@@ -1684,10 +1658,13 @@ app.delete("/make-server-4e36197a/trips/:id", async (c) => {
       }
     }
 
-    await kv.set(`ovora:trip:${id}`, { ...existing, deletedAt: new Date().toISOString(), status: 'cancelled' });
+    const write = await patchRecord(`ovora:trip:${id}`,
+      t => (t.deletedAt ? null : { deletedAt: new Date().toISOString(), status: 'cancelled' }), 5);
+    if (write.result === 'not_found') return c.json({ error: "Trip not found" }, 404);
+    if (write.result === 'conflict') return c.json({ error: "CONFLICT: try again" }, 503);
 
     // ── W2: Cascade cancel all offers on this trip (point F) ─────────────
-    await cancelAllTripOffers(id, existing);
+    await cancelAllTripOffers(id, write.record);
 
     // ✅ FIX #1: Удаляем вторичный индекс водителя при soft-delete
     if (existing.driverEmail) {
@@ -1808,12 +1785,17 @@ app.get("/make-server-4e36197a/cargos/:id", async (c) => {
   }
 });
 
+const CARGO_OWNER_EDITABLE = [
+  'from', 'to', 'date', 'fromLat', 'fromLng', 'toLat', 'toLng',
+  'cargoWeight', 'budget', 'currency', 'notes', 'senderName', 'senderPhone', 'senderAvatar',
+] as const;
+
 app.put("/make-server-4e36197a/cargos/:id", async (c) => {
   try {
     const id = c.req.param("id");
     const body = await c.req.json();
     const existing: any = await kv.get(`ovora:cargo:${id}`);
-    if (!existing) return c.json({ error: "Cargo not found" }, 404);
+    if (!existing || existing.deletedAt) return c.json({ error: "Cargo not found" }, 404);
 
     // Ownership check — only the cargo sender may update it
     const callerEmail = getCallerEmail(c, body);
@@ -1825,14 +1807,20 @@ app.put("/make-server-4e36197a/cargos/:id", async (c) => {
       return c.json({ error: "Forbidden: you are not the owner of this cargo" }, 403);
     }
 
-    const { callerEmail: _ignored, ...cleanedBody } = body as any;
-    if (body.from) cleanedBody.from = cleanAddress(body.from);
-    if (body.to) cleanedBody.to = cleanAddress(body.to);
+    // Статус, владелец и даты — только через сервер: статусом управляет замок отклика
+    // (active → matched), снятие — DELETE. Иначе вернув «active», можно принять второй отклик.
+    const cleanedBody: Record<string, unknown> = {};
+    for (const field of CARGO_OWNER_EDITABLE) {
+      if (field in body) cleanedBody[field] = body[field];
+    }
+    if (cleanedBody.from) cleanedBody.from = cleanAddress(String(cleanedBody.from));
+    if (cleanedBody.to) cleanedBody.to = cleanAddress(String(cleanedBody.to));
 
-    const updated = { ...existing, ...cleanedBody, id, updatedAt: new Date().toISOString() };
-    await kv.set(`ovora:cargo:${id}`, updated);
+    const write = await patchRecord(`ovora:cargo:${id}`, cg => (cg.deletedAt ? null : cleanedBody));
+    if (write.result === 'not_found' || write.result === 'skipped') return c.json({ error: "Cargo not found" }, 404);
+    if (write.result === 'conflict') return c.json({ error: "CONFLICT: try again" }, 503);
     await CargoAuditLog.record({ action: 'cargo.edit', actorEmail: callerEmail, targetId: id, targetType: 'cargo', details: { fields: Object.keys(cleanedBody) } });
-    return c.json({ success: true, cargo: updated });
+    return c.json({ success: true, cargo: write.record });
   } catch (err) {
     console.log("Error PUT /cargos/:id:", err);
     return c.json({ error: 'Внутренняя ошибка сервера' }, 500);
@@ -1853,8 +1841,11 @@ app.delete("/make-server-4e36197a/cargos/:id", async (c) => {
       return c.json({ error: "Forbidden: you are not the owner of this cargo" }, 403);
     }
 
-    await kv.set(`ovora:cargo:${id}`, { ...existing, deletedAt: new Date().toISOString(), status: 'cancelled' });
-    await cancelCargoOffers(id, existing);
+    const write = await patchRecord(`ovora:cargo:${id}`,
+      cg => (cg.deletedAt ? null : { deletedAt: new Date().toISOString(), status: 'cancelled' }), 5);
+    if (write.result === 'not_found') return c.json({ error: "Cargo not found" }, 404);
+    if (write.result === 'conflict') return c.json({ error: "CONFLICT: try again" }, 503);
+    await cancelCargoOffers(id, write.record);
     if (existing.senderEmail) {
       await kv.del(`ovora:sendercargos:${existing.senderEmail}:${id}`).catch(() => {});
     }
@@ -1895,6 +1886,19 @@ app.post("/make-server-4e36197a/offers",
       }
     }
 
+    // Водитель, маршрут и цена берутся из поездки, а не из запроса: иначе можно назначить
+    // водителем себя и списывать места с чужой поездки или забронировать по своей цене.
+    const trip: any = await kv.get(`ovora:trip:${tripId}`);
+    if (!trip || trip.deletedAt) return c.json({ error: "Trip not found" }, 404);
+    if (capacity.isTripClosed(trip)) return c.json({ error: "TRIP_CLOSED: this trip is cancelled or completed" }, 409);
+    if (!trip.driverEmail) return c.json({ error: "Trip has no driver" }, 409);
+    if (trip.driverEmail.toLowerCase().trim() === senderEmail.toLowerCase().trim()) {
+      return c.json({ error: "You cannot book your own trip" }, 400);
+    }
+    const parsedCounts = capacity.parseOfferCounts(body);
+    if (!parsedCounts.ok) return c.json({ error: parsedCounts.error }, 400);
+    const counts = parsedCounts.counts;
+
     // ✅ Запрет дублей: у одного отправителя не может быть двух pending-оферт
     // на один и тот же рейс одновременно (иначе можно наспамить дублями с
     // разными ценами) — список оферт рейса невелик, full-scan по tripId безопасен.
@@ -1907,33 +1911,25 @@ app.post("/make-server-4e36197a/offers",
     const offerId = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     const now = new Date().toISOString();
 
-    // LOG-8: Server-side price validation — reject if client-sent price doesn't match trip rates
-    // Same formula as TripDetail.tsx / ProposalFormModal.tsx: child seat = Math.round(pricePerSeat / 2)
-    if (body.price != null && body.price > 0) {
-      const trip: any = await kv.get(`ovora:trip:${tripId}`);
-      if (trip) {
-        const expectedSeats = (body.requestedSeats || 0) * (trip.pricePerSeat || 0);
-        const expectedChildren = (body.requestedChildren || 0) * Math.round((trip.pricePerSeat || 0) / 2);
-        const expectedCargo = (body.requestedCargo || 0) * (trip.pricePerKg || 0);
-        const expectedTotal = expectedSeats + expectedChildren + expectedCargo;
-        if (expectedTotal > 0 && Math.abs(body.price - expectedTotal) > 1) {
-          console.warn(`[POST /offers] Price mismatch: client=${body.price}, expected=${expectedTotal}`);
-          return c.json({ error: `Price mismatch: expected ${expectedTotal}, got ${body.price}` }, 400);
-        }
-      }
+    // LOG-8: цена считается на сервере. Та же формула, что во фронте (capacity.expectedOfferPrice);
+    // расхождение больше 1 — ошибка клиента, пропуск цены — тоже.
+    const expectedTotal = capacity.expectedOfferPrice(trip, counts);
+    const clientPrice = Number(body.price ?? body.totalPrice ?? 0);
+    if (!Number.isFinite(clientPrice) || Math.abs(clientPrice - expectedTotal) > 1) {
+      console.warn(`[POST /offers] Price mismatch: client=${body.price}, expected=${expectedTotal}`);
+      return c.json({ error: `Price mismatch: expected ${expectedTotal}, got ${body.price}` }, 400);
     }
 
     // Whitelist allowed fields instead of spreading entire body (LOG-8 broader fix)
     const offer = {
       offerId, tripId, createdAt: now, updatedAt: now, status: 'pending',
       senderEmail: body.senderEmail, senderName: body.senderName, senderPhone: body.senderPhone,
-      driverEmail: body.driverEmail, driverName: body.driverName,
-      type: body.type, requestedSeats: body.requestedSeats || 0,
-      requestedChildren: body.requestedChildren || 0, requestedCargo: body.requestedCargo || 0,
-      price: body.price, totalPrice: body.totalPrice, currency: body.currency || 'TJS',
+      driverEmail: trip.driverEmail, driverName: trip.driverName || body.driverName,
+      type: body.type, ...counts,
+      price: expectedTotal, totalPrice: expectedTotal, currency: trip.currency || body.currency || 'TJS',
       weight: body.weight, volume: body.volume,
-      notes: body.notes, from: body.from, to: body.to, date: body.date,
-      vehicleType: body.vehicleType, cargoType: body.cargoType,
+      notes: body.notes, from: trip.from, to: trip.to, date: trip.date,
+      vehicleType: trip.vehicle || body.vehicleType, cargoType: body.cargoType,
     };
     await kv.set(`ovora:offer:${tripId}:${offerId}`, offer);
 
@@ -1949,7 +1945,6 @@ app.post("/make-server-4e36197a/offers",
     // ✅ Создать уведомление водителю о новой оферте
     try {
       if (offer.driverEmail && offer.senderName) {
-        const trip: any = await kv.get(`ovora:trip:${tripId}`);
         const tripRoute = trip ? `${trip.from} → ${trip.to}` : 'вашу поездку';
         const notificationId = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
         await kv.set(`ovora:notification:${offer.driverEmail}:${notificationId}`, {
@@ -2165,12 +2160,10 @@ app.post("/make-server-4e36197a/offers/cleanup", async (c) => {
       const pairKey = [driverEmail, offer.senderEmail].sort().join('|');
       if (!activeChatPairs.has(pairKey)) {
         const offerKey = `ovora:offer:${offer.tripId}:${offer.offerId}`;
-        await kv.set(offerKey, {
-          ...offer,
-          status: 'cancelled',
-          cancelledAt: new Date().toISOString(),
-          cancelReason: 'chat_not_found',
-        });
+        // Условно и только из pending: водитель мог принять оффер, пока шла проверка.
+        const t = await transitionOffer(offerKey, ['pending'], 'cancelled',
+          { cancelledAt: new Date().toISOString(), cancelReason: 'chat_not_found' });
+        if (t.result !== 'ok') continue;
         // ✅ FIX #6: Чистим индексы для отменённых offers
         await kv.del(`ovora:driveroffers:${driverEmail}:${offer.offerId}`).catch(() => {});
         if (offer.senderEmail) {
@@ -2210,38 +2203,53 @@ app.put("/make-server-4e36197a/offers/:tripId/:offerId", async (c) => {
       return c.json({ error: "Forbidden: you are not a participant of this offer" }, 403);
     }
 
-    const { callerEmail: _drop, ...safeBody } = body;
-    const updated = { ...existing, ...safeBody, tripId, offerId, updatedAt: new Date().toISOString() };
-
-    // ── W2: Capacity check BEFORE recording the offer ──────────────────────
-    // adjustTripCapacity uses setIfUnchanged for atomic conditional write.
-    // Order: capacity first, then record offer. On insufficient → 409.
-    if (updated.status === 'accepted' && existing.status !== 'accepted') {
-      const capResult = await adjustTripCapacity(tripId, existing, -1);
-      if (capResult === 'insufficient') {
-        return c.json({ error: "INSUFFICIENT_CAPACITY: not enough seats/cargo capacity left on this trip" }, 409);
-      }
-      if (capResult === 'conflict') {
-        return c.json({ error: "CAPACITY_CONFLICT: try again" }, 503);
-      }
-      if (capResult === 'not_found') {
-        return c.json({ error: "Trip not found" }, 404);
-      }
-      try {
-        await kv.set(key, updated);
-      } catch (writeErr) {
-        await restoreTripCapacity(tripId, existing, `PUT /offers accept write failed/${offerId}`);
-        throw writeErr;
-      }
-    } else {
-      await kv.set(key, updated);
+    // Меняется только статус и только по правилам роли (capacity.tsx): отправитель не может
+    // сам принять свою заявку, а принятая бронь не меняет количество мест задним числом.
+    const target = String(body.status || '');
+    if (!target) return c.json({ error: "status required" }, 400);
+    if (target === existing.status) return c.json({ success: true, offer: existing });
+    const allowed = (isDriver && capacity.canChangeTripOffer('driver', existing.status, target))
+      || (isSender && capacity.canChangeTripOffer('sender', existing.status, target));
+    if (!allowed) {
+      console.warn(`[PUT /offers] Forbidden transition ${existing.status} → ${target} by ${callerEmail} on ${offerId}`);
+      return c.json({ error: `Forbidden: cannot change offer from ${existing.status} to ${target}` }, 403);
     }
 
-    const isFinalStatus = ['cancelled', 'declined', 'deleted', 'rejected'].includes(updated.status);
+    // ── W2: места списываются ДО записи оффера, а сама запись — условная ────
+    const accepting = target === 'accepted';
+    if (accepting) {
+      const capResult = await adjustTripCapacity(tripId, existing, -1);
+      if (capResult !== 'ok') {
+        const [status, error] = CAPACITY_ERRORS[capResult];
+        return c.json({ error }, status);
+      }
+    }
+    const stamp = new Date().toISOString();
+    const extra = accepting ? { acceptedAt: stamp } : target === 'cancelled' ? { cancelledAt: stamp } : { declinedAt: stamp };
+    let transition: Awaited<ReturnType<typeof transitionOffer>>;
+    try {
+      transition = await transitionOffer(key, [existing.status], target, extra);
+    } catch (writeErr) {
+      if (accepting) await restoreTripCapacity(tripId, existing, `PUT /offers accept write failed/${offerId}`);
+      throw writeErr;
+    }
+    if (transition.result !== 'ok') {
+      // Оффер изменили параллельно (например, отправитель отменил, пока водитель принимал).
+      if (accepting) await restoreTripCapacity(tripId, existing, `PUT /offers accept lost race/${offerId}`);
+      if (transition.result === 'not_found') return c.json({ error: "Offer not found" }, 404);
+      return c.json({ error: "OFFER_CHANGED: the offer was updated by someone else, refresh" }, 409);
+    }
+    const updated = transition.record;
+    if (accepting && await undoAcceptIfTripClosed(tripId, updated)) {
+      const [status, error] = CAPACITY_ERRORS.closed;
+      return c.json({ error }, status);
+    }
+
+    const isFinalStatus = FINAL_OFFER_STATUSES.includes(updated.status);
 
     // ── W2: Restore capacity when rejecting/cancelling an accepted offer ────
-    if (isFinalStatus && existing.status === 'accepted') {
-      await restoreTripCapacity(tripId, existing, `PUT /offers reject/${offerId}`);
+    if (isFinalStatus && transition.previous.status === 'accepted') {
+      await restoreTripCapacity(tripId, transition.previous, `PUT /offers ${target}/${offerId}`);
     }
 
     // ✅ FIX #6: При cancelled/declined/deleted — удаляем индексы, иначе обновляем
@@ -2522,30 +2530,46 @@ app.put("/make-server-4e36197a/cargo-offers/:cargoId/:offerId", async (c) => {
       return c.json({ error: "Forbidden: you are not a participant of this offer" }, 403);
     }
 
-    const { callerEmail: _drop, ...safeBody } = body;
-    const updated = { ...existing, ...safeBody, cargoId, offerId, updatedAt: new Date().toISOString() };
+    // Только статус и только по правилам роли: водитель не может сам принять свой отклик
+    // и тем самым забрать чужой груз.
+    const target = String(body.status || '');
+    if (!target) return c.json({ error: "status required" }, 400);
+    if (target === existing.status) return c.json({ success: true, offer: existing });
+    const allowed = (isSender && capacity.canChangeCargoOffer('sender', existing.status, target))
+      || (isDriver && capacity.canChangeCargoOffer('driver', existing.status, target));
+    if (!allowed) {
+      console.warn(`[PUT /cargo-offers] Forbidden transition ${existing.status} → ${target} by ${callerEmail} on ${offerId}`);
+      return c.json({ error: `Forbidden: cannot change offer from ${existing.status} to ${target}` }, 403);
+    }
 
     // ── W2: Cargo single-accept lock (point G) ────────────────────────────
-    let cargoLocked = false;
-    if (updated.status === 'accepted' && existing.status !== 'accepted') {
+    const accepting = target === 'accepted';
+    if (accepting) {
       const lock = await transitionCargoStatus(cargoId, 'active', 'matched', 3);
       if (lock === 'not_found') return c.json({ error: 'Груз не найден' }, 404);
       if (lock !== 'ok') {
         return c.json({ error: 'На этот груз уже принят другой оффер' }, 409);
       }
-      cargoLocked = true;
     }
 
-    // Record the offer — with compensation if cargo was locked
+    const stamp = new Date().toISOString();
+    const extra = accepting ? { acceptedAt: stamp } : target === 'cancelled' ? { cancelledAt: stamp } : { rejectedAt: stamp };
+    let transition: Awaited<ReturnType<typeof transitionOffer>>;
     try {
-      await kv.set(key, updated);
+      transition = await transitionOffer(key, [existing.status], target, extra);
     } catch (offerErr) {
-      if (cargoLocked) await releaseCargo(cargoId, `cargo-offer write failed/${offerId}`);
+      if (accepting) await releaseCargo(cargoId, `cargo-offer write failed/${offerId}`);
       throw offerErr;
     }
+    if (transition.result !== 'ok') {
+      if (accepting) await releaseCargo(cargoId, `cargo-offer lost race/${offerId}`);
+      if (transition.result === 'not_found') return c.json({ error: "Offer not found" }, 404);
+      return c.json({ error: "OFFER_CHANGED: the offer was updated by someone else, refresh" }, 409);
+    }
+    const updated = transition.record;
 
     // ── W2: Reverse path matched → active when offer is cancelled/rejected ──
-    if (['cancelled','declined','deleted','rejected'].includes(updated.status) && existing.status === 'accepted') {
+    if (FINAL_OFFER_STATUSES.includes(updated.status) && transition.previous.status === 'accepted') {
       await releaseCargo(cargoId, `cargo-offer ${updated.status}/${offerId}`);
     }
 
@@ -3032,6 +3056,7 @@ app.put("/make-server-4e36197a/chat/:chatId/read", async (c) => {
 });
 
 // Update proposal status in a specific message
+const PROPOSAL_STATUSES = ['accepted', 'rejected', 'declined', 'countered'];
 app.put("/make-server-4e36197a/chat/:chatId/proposal/:proposalId", async (c) => {
   try {
     const chatId = c.req.param("chatId");
@@ -3039,6 +3064,14 @@ app.put("/make-server-4e36197a/chat/:chatId/proposal/:proposalId", async (c) => 
     const { status, senderId } = await c.req.json();
     if (!status) return c.json({ error: "status required" }, 400);
     if (!senderId) return c.json({ error: "senderId required" }, 400);
+    if (!PROPOSAL_STATUSES.includes(status)) return c.json({ error: `Unknown proposal status: ${status}` }, 400);
+
+    // senderId приходит из тела — при токен-авторизации он обязан совпадать с владельцем токена,
+    // иначе любой, кто знает email участника, принимает оферты от его имени.
+    const actor = getCallerEmail(c, { callerEmail: senderId });
+    if (!actor || actor.toLowerCase().trim() !== String(senderId).toLowerCase().trim()) {
+      return c.json({ error: "Forbidden: senderId must match authenticated user" }, 403);
+    }
 
     console.log(`[proposal] Updating proposal status:`, {
       chatId,
@@ -3059,6 +3092,21 @@ app.put("/make-server-4e36197a/chat/:chatId/proposal/:proposalId", async (c) => 
     const messages: any[] = await kv.getByPrefix(`ovora:chat:${chatId}:`);
     const msg = messages.find(m => m && m.proposal?.id === proposalId);
     if (!msg) return c.json({ error: "Proposal message not found" }, 404);
+
+    if (msg.proposal.status === status) return c.json({ success: true });
+    if (msg.proposal.status && msg.proposal.status !== 'pending') {
+      return c.json({ error: `PROPOSAL_CLOSED: proposal is already ${msg.proposal.status}` }, 409);
+    }
+    // Принять, отклонить и предложить встречные условия может только водитель поездки,
+    // отменить — только автор заявки (ProposalCard.tsx показывает кнопки так же).
+    const proposalTripId = msg.proposal?.tripId || meta.tripId;
+    const proposalTrip: any = proposalTripId ? await kv.get(`ovora:trip:${proposalTripId}`) : null;
+    const actorIsDriver = proposalTrip?.driverEmail ? proposalTrip.driverEmail === senderId : msg.senderId !== senderId;
+    const isProposalAuthor = msg.senderId === senderId || msg.proposal?.senderEmail === senderId;
+    if ((status === 'declined') === actorIsDriver || (status === 'declined' && !isProposalAuthor)) {
+      console.warn(`[proposal] Role violation: ${senderId} tried ${status} on ${proposalId} (driver=${actorIsDriver})`);
+      return c.json({ error: "Forbidden: this action belongs to the other side of the deal" }, 403);
+    }
 
     const updatedMsg = { ...msg, proposal: { ...msg.proposal, status } };
     await kv.set(`ovora:chat:${chatId}:${msg.msgId}`, updatedMsg);
@@ -3106,12 +3154,14 @@ app.put("/make-server-4e36197a/chat/:chatId/proposal/:proposalId", async (c) => 
             senderEmail && o.senderEmail === senderEmail
           );
 
-          // Pass 2: fallback — tripId only (in case senderEmail differs)
+          // Pass 2: fallback — tripId only (in case senderEmail differs), but only an offer of
+          // someone in this chat: otherwise the driver would accept a stranger's request.
           if (!matchingOffer) {
             matchingOffer = allOffers.find((o: any) =>
               o &&
               String(o.tripId) === String(tripId) &&
-              o.status === 'pending'
+              o.status === 'pending' &&
+              participants.includes(o.senderEmail)
             );
             if (matchingOffer) {
               console.log(`[accept] Found offer via fallback (tripId only), senderEmail=${matchingOffer.senderEmail}`);
@@ -3129,25 +3179,34 @@ app.put("/make-server-4e36197a/chat/:chatId/proposal/:proposalId", async (c) => 
           if (matchingOffer) {
             // ── W2: Capacity check + reduction via adjustTripCapacity (point C) ──
             const capResult = await adjustTripCapacity(tripId, matchingOffer, -1);
-            if (capResult === 'insufficient') {
-              console.warn(`[accept] Insufficient capacity on trip ${tripId} — reverting proposal to pending`);
+            if (capResult !== 'ok') {
+              console.warn(`[accept] Capacity ${capResult} on trip ${tripId} — reverting proposal to pending`);
               await kv.set(`ovora:chat:${chatId}:${msg.msgId}`, msg);
               await kv.set(metaKey, meta);
-              return c.json({ error: "INSUFFICIENT_CAPACITY: not enough seats/cargo capacity left on this trip" }, 409);
-            }
-            if (capResult === 'conflict' || capResult === 'not_found') {
-              await kv.set(`ovora:chat:${chatId}:${msg.msgId}`, msg);
-              await kv.set(metaKey, meta);
-              return c.json({ error: capResult === 'not_found' ? 'Trip not found' : 'CAPACITY_CONFLICT: try again' }, capResult === 'not_found' ? 404 : 503);
+              const [status, error] = CAPACITY_ERRORS[capResult];
+              return c.json({ error }, status);
             }
 
             // 1. Mark offer as accepted
             const offerKey = `ovora:offer:${matchingOffer.tripId}:${matchingOffer.offerId}`;
+            let accepted: Awaited<ReturnType<typeof transitionOffer>>;
             try {
-              await kv.set(offerKey, { ...matchingOffer, status: 'accepted', acceptedAt: new Date().toISOString() });
+              accepted = await transitionOffer(offerKey, ['pending'], 'accepted', { acceptedAt: new Date().toISOString() });
             } catch (writeErr) {
               await restoreTripCapacity(tripId, matchingOffer, `chat accept write failed/${matchingOffer.offerId}`);
               throw writeErr;
+            }
+            if (accepted.result !== 'ok') {
+              await restoreTripCapacity(tripId, matchingOffer, `chat accept lost race/${matchingOffer.offerId}`);
+              await kv.set(`ovora:chat:${chatId}:${msg.msgId}`, msg);
+              await kv.set(metaKey, meta);
+              return c.json({ error: "OFFER_CHANGED: the offer was updated by someone else, refresh" }, 409);
+            }
+            if (await undoAcceptIfTripClosed(tripId, matchingOffer)) {
+              await kv.set(`ovora:chat:${chatId}:${msg.msgId}`, msg);
+              await kv.set(metaKey, meta);
+              const [status, error] = CAPACITY_ERRORS.closed;
+              return c.json({ error }, status);
             }
 
             // ✅ Создать уведомление отправителю о принятии оферты
@@ -3227,7 +3286,8 @@ app.put("/make-server-4e36197a/chat/:chatId/proposal/:proposalId", async (c) => 
             matchingOffer = allOffers.find((o: any) =>
               o &&
               String(o.tripId) === String(tripId) &&
-              o.status === 'pending'
+              o.status === 'pending' &&
+              participants.includes(o.senderEmail)
             );
             if (matchingOffer) {
               console.log(`[reject] Found offer via fallback (tripId only), senderEmail=${matchingOffer.senderEmail}`);
@@ -3235,18 +3295,18 @@ app.put("/make-server-4e36197a/chat/:chatId/proposal/:proposalId", async (c) => 
           }
 
           if (matchingOffer) {
-            // W2: Restore capacity if this offer was previously accepted (point D)
-            if (matchingOffer.status === 'accepted' && tripId) {
-              await restoreTripCapacity(tripId, matchingOffer, `chat reject/${matchingOffer.offerId}`);
-            }
-
             // Mark offer as declined (using 'declined' to match TripDetail expectations)
             const offerKey = `ovora:offer:${matchingOffer.tripId}:${matchingOffer.offerId}`;
-            await kv.set(offerKey, { 
-              ...matchingOffer, 
-              status: 'declined', 
-              declinedAt: new Date().toISOString() 
-            });
+            const declined = await transitionOffer(offerKey, ['pending', 'accepted'], 'declined',
+              { declinedAt: new Date().toISOString() }, 5);
+            if (declined.result !== 'ok') throw new Error(`offer ${matchingOffer.offerId} changed concurrently: ${declined.result}`);
+            // W2: Restore capacity if this offer was previously accepted (point D)
+            if (declined.previous.status === 'accepted') {
+              await restoreTripCapacity(tripId, declined.previous, `chat reject/${matchingOffer.offerId}`);
+            }
+            for (const idx of [`ovora:driveroffers:${declined.previous.driverEmail}:${matchingOffer.offerId}`, `ovora:senderoffers:${declined.previous.senderEmail}:${matchingOffer.offerId}`]) {
+              await kv.del(idx).catch(() => {});
+            }
             console.log(`[reject] Offer ${matchingOffer.offerId} marked as declined`);
 
             // ✅ Создать уведомление отправителю об отклонении оферты
@@ -3440,32 +3500,25 @@ app.put("/make-server-4e36197a/users/:email/sync-trips", async (c) => {
 
     for (const trip of userTrips) {
       if (!trip.id) continue;
-      const updatedTrip = {
-        ...trip,
+      const write = await patchRecord(`ovora:trip:${trip.id}`, () => ({
         driverName: displayName,
         ...(avatarUrl ? { driverAvatar: avatarUrl } : {}),
-        updatedAt: new Date().toISOString(),
-      };
-      await kv.set(`ovora:trip:${trip.id}`, updatedTrip);
-      updatedTrips++;
-      console.log(`[sync-trips] Updated trip ${trip.id}`);
+      }));
+      if (write.result === 'ok') updatedTrips++;
     }
 
     // 2. Update offers where this user is the sender
     const allOffers: any[] = await kv.getByPrefix(`ovora:offer:`);
     const userOffers = allOffers.filter(o => o && o.senderEmail === email);
 
+    // Условно: обычная запись вернула бы оффер в pending, если водитель принял его в этот момент.
     for (const offer of userOffers) {
       if (!offer.tripId || !offer.offerId) continue;
-      const updatedOffer = {
-        ...offer,
+      const write = await patchRecord(`ovora:offer:${offer.tripId}:${offer.offerId}`, () => ({
         senderName: displayName,
         ...(avatarUrl ? { senderAvatar: avatarUrl } : {}),
-        updatedAt: new Date().toISOString(),
-      };
-      await kv.set(`ovora:offer:${offer.tripId}:${offer.offerId}`, updatedOffer);
-      updatedOffers++;
-      console.log(`[sync-trips] Updated offer ${offer.tripId}:${offer.offerId}`);
+      }));
+      if (write.result === 'ok') updatedOffers++;
     }
 
     console.log(`[sync-trips] Updated ${updatedTrips} trips and ${updatedOffers} offers for user ${email}`);
@@ -3536,12 +3589,11 @@ app.delete("/make-server-4e36197a/chat/:chatId", async (c) => {
 
           if (driverOwnsTrip) {
             const offerKey = `ovora:offer:${offer.tripId}:${offer.offerId}`;
-            await kv.set(offerKey, {
-              ...offer,
-              status: 'cancelled',
-              cancelledAt: new Date().toISOString(),
-              cancelReason: 'chat_deleted',
-            });
+            const t = await transitionOffer(offerKey, ['pending'], 'cancelled',
+              { cancelledAt: new Date().toISOString(), cancelReason: 'chat_deleted' });
+            if (t.result !== 'ok') continue;
+            if (offer.driverEmail) await kv.del(`ovora:driveroffers:${offer.driverEmail}:${offer.offerId}`).catch(() => {});
+            if (offer.senderEmail) await kv.del(`ovora:senderoffers:${offer.senderEmail}:${offer.offerId}`).catch(() => {});
             cancelledCount++;
             console.log(`[delete-chat] Cancelled offer ${offer.offerId} trip=${offer.tripId} sender=${offer.senderEmail} driver=${driverEmail}`);
           }
@@ -5383,8 +5435,10 @@ app.delete("/make-server-4e36197a/admin/cargos/:id", async (c) => {
     const id = c.req.param("id");
     const existing: any = await kv.get(`ovora:cargo:${id}`);
     if (!existing) return c.json({ error: "Cargo not found" }, 404);
-    await kv.set(`ovora:cargo:${id}`, { ...existing, deletedAt: new Date().toISOString(), status: 'cancelled' });
-    await cancelCargoOffers(id, existing);
+    const write = await patchRecord(`ovora:cargo:${id}`,
+      cg => (cg.deletedAt ? null : { deletedAt: new Date().toISOString(), status: 'cancelled' }), 5);
+    if (write.result === 'conflict') return c.json({ error: "CONFLICT: try again" }, 503);
+    if (write.record) await cancelCargoOffers(id, write.record);
     if (existing.senderEmail) {
       await kv.del(`ovora:sendercargos:${existing.senderEmail}:${id}`).catch(() => {});
       const sender: any = await kv.get(`ovora:user:email:${existing.senderEmail.toLowerCase().trim()}`);
@@ -5408,7 +5462,9 @@ app.delete("/make-server-4e36197a/admin/cargos/:id", async (c) => {
 });
 
 // ✅ Admin: редактирование груза (модерация/разрешение спора, без проверки владельца)
-const CARGO_ADMIN_EDITABLE = ['from', 'to', 'cargoWeight', 'budget', 'currency', 'notes', 'status'] as const;
+// Без status: админка его не присылает (CargosManagement.tsx), а ручная смена статуса обходит
+// замок отклика. Снять груз — DELETE /admin/cargos/:id, он же отменяет отклики.
+const CARGO_ADMIN_EDITABLE = ['from', 'to', 'cargoWeight', 'budget', 'currency', 'notes'] as const;
 app.put("/make-server-4e36197a/admin/cargos/:id", async (c) => {
   try {
     const id = c.req.param("id");
@@ -5423,11 +5479,12 @@ app.put("/make-server-4e36197a/admin/cargos/:id", async (c) => {
     if (updates.from) updates.from = cleanAddress(String(updates.from));
     if (updates.to) updates.to = cleanAddress(String(updates.to));
 
-    const updated = { ...existing, ...updates, id, updatedAt: new Date().toISOString() };
-    await kv.set(`ovora:cargo:${id}`, updated);
+    const write = await patchRecord(`ovora:cargo:${id}`, () => updates);
+    if (write.result === 'not_found') return c.json({ error: "Cargo not found" }, 404);
+    if (write.result !== 'ok') return c.json({ error: "CONFLICT: try again" }, 503);
 
     await CargoAuditLog.record({ action: 'cargo.admin_edit', actorEmail: adminActor(c), targetId: id, targetType: 'cargo', details: { fields: Object.keys(updates) } });
-    return c.json({ success: true, cargo: updated });
+    return c.json({ success: true, cargo: write.record });
   } catch (err) {
     console.log("Error PUT /admin/cargos/:id:", err);
     return c.json({ error: 'Внутренняя ошибка сервера' }, 500);
@@ -5436,6 +5493,7 @@ app.put("/make-server-4e36197a/admin/cargos/:id", async (c) => {
 
 // ✅ Admin: разрешение спора между водителем и отправителем — смена статуса оферты.
 // Если отменяется ранее принятая оферта — возвращаем списанную вместимость поездке.
+const ADMIN_OFFER_STATUSES = ['cancelled', 'declined', 'rejected'];
 app.put("/make-server-4e36197a/admin/offers/:tripId/:offerId/status", async (c) => {
   try {
     const tripId = c.req.param("tripId");
@@ -5443,36 +5501,38 @@ app.put("/make-server-4e36197a/admin/offers/:tripId/:offerId/status", async (c) 
     const { status } = await c.req.json();
     if (!status) return c.json({ error: "status required" }, 400);
 
+    // Админ разрешает споры отменой. «Принять» за водителя нельзя: места при этом не
+    // списывались бы. OffersManagement.tsx присылает только cancelled.
+    if (!ADMIN_OFFER_STATUSES.includes(status)) {
+      return c.json({ error: `status must be one of: ${ADMIN_OFFER_STATUSES.join(', ')}` }, 400);
+    }
     const key = `ovora:offer:${tripId}:${offerId}`;
-    const existing: any = await kv.get(key);
-    if (!existing) return c.json({ error: "Offer not found" }, 404);
+    const transition = await transitionOffer(key, LIVE_OFFER_STATUSES, status,
+      { cancelledAt: new Date().toISOString(), cancelReason: 'admin' }, 5);
+    if (transition.result === 'not_found') return c.json({ error: "Offer not found" }, 404);
+    if (transition.result !== 'ok') {
+      return c.json({ error: `OFFER_CHANGED: offer is already ${transition.previous?.status || 'changed'}` }, 409);
+    }
+    const existing = transition.previous;
+    const updated = transition.record;
 
-    const updated = { ...existing, status, updatedAt: new Date().toISOString() };
-    await kv.set(key, updated);
-
-    const isFinalStatus = ['cancelled', 'declined', 'deleted', 'rejected'].includes(status);
-    if (isFinalStatus) {
-      if (existing.driverEmail) await kv.del(`ovora:driveroffers:${existing.driverEmail}:${offerId}`).catch(() => {});
-      if (existing.senderEmail) await kv.del(`ovora:senderoffers:${existing.senderEmail}:${offerId}`).catch(() => {});
-
-      // W2: Restore capacity via adjustTripCapacity (clamped, with retry) — point E
-      if (existing.status === 'accepted') {
-        await restoreTripCapacity(tripId, existing, `admin/${offerId}`);
-      }
+    if (existing.driverEmail) await kv.del(`ovora:driveroffers:${existing.driverEmail}:${offerId}`).catch(() => {});
+    if (existing.senderEmail) await kv.del(`ovora:senderoffers:${existing.senderEmail}:${offerId}`).catch(() => {});
+    // W2: Restore capacity via adjustTripCapacity (clamped, with retry) — point E
+    if (existing.status === 'accepted') {
+      await restoreTripCapacity(tripId, existing, `admin/${offerId}`);
     }
 
-    if (isFinalStatus) {
-      for (const email of [existing.senderEmail, existing.driverEmail].filter(Boolean)) {
-        const user: any = await kv.get(`ovora:user:email:${email.toLowerCase().trim()}`);
-        if (user && !(await throttleEmail(email, `offer-admin-${status}-${tripId}-${offerId}`, 3_600_000))) {
-          const tpl = adminActionTemplate({
-            firstName: user.firstName || 'Пользователь',
-            title: 'оферта изменена администратором',
-            message: `Статус оферты по поездке изменён администратором на «${status}» в рамках разрешения спора.`,
-            email,
-          });
-          sendEmail({ to: email, subject: tpl.subject, html: tpl.html }).catch(() => {});
-        }
+    for (const email of [existing.senderEmail, existing.driverEmail].filter(Boolean)) {
+      const user: any = await kv.get(`ovora:user:email:${email.toLowerCase().trim()}`);
+      if (user && !(await throttleEmail(email, `offer-admin-${status}-${tripId}-${offerId}`, 3_600_000))) {
+        const tpl = adminActionTemplate({
+          firstName: user.firstName || 'Пользователь',
+          title: 'оферта изменена администратором',
+          message: `Статус оферты по поездке изменён администратором на «${status}» в рамках разрешения спора.`,
+          email,
+        });
+        sendEmail({ to: email, subject: tpl.subject, html: tpl.html }).catch(() => {});
       }
     }
 
