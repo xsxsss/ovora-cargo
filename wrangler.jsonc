@@ -1,0 +1,11 @@
+// Cloudflare Workers: сайт — статические файлы из dist, без серверного кода.
+// Сборка в Cloudflare: build command "npm run build", deploy command "npx wrangler deploy".
+{
+  "name": "ovora-cargo",
+  "compatibility_date": "2026-09-14",
+  "assets": {
+    "directory": "./dist/",
+    // Любой неизвестный адрес отдаёт index.html — роутер приложения сам откроет страницу.
+    "not_found_handling": "single-page-application"
+  }
+}
