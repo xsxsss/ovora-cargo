@@ -1973,14 +1973,13 @@ app.put("/make-server-4e36197a/offers/:tripId/:offerId", async (c) => {
 
     await kv.set(key, updated);
 
-    const isFinalStatus = ['cancelled', 'declined', 'deleted', 'rejected'].includes(updated.status);
-
     // ── W2: Restore capacity when rejecting/cancelling an accepted offer ────
     if (isFinalStatus && existing.status === 'accepted') {
       await restoreTripCapacity(tripId, existing, `PUT /offers reject/${offerId}`);
     }
 
     // ✅ FIX #6: При cancelled/declined/deleted — удаляем индексы, иначе обновляем
+    const isFinalStatus = ['cancelled', 'declined', 'deleted', 'rejected'].includes(updated.status);
     if (isFinalStatus) {
       if (existing.driverEmail) {
         await kv.del(`ovora:driveroffers:${existing.driverEmail}:${offerId}`).catch(() => {});
@@ -2948,27 +2947,8 @@ app.put("/make-server-4e36197a/chat/:chatId/proposal/:proposalId", async (c) => 
               console.log('[accept] Error creating notification:', notifErr);
             }
 
-            // 2. Reduce trip capacity — use correct field names matching SearchPage
-            const trip: any = await kv.get(`ovora:trip:${tripId}`);
-            if (trip) {
-              const updatedTrip = {
-                ...trip,
-                // ✅ Field name: availableSeats (adult seats)
-                availableSeats: Math.max(0, (trip.availableSeats || 0) - (matchingOffer.requestedSeats || 0)),
-                // ✅ BUG FIX: was 'childrenSeats', correct field is 'childSeats'
-                childSeats: Math.max(0, (trip.childSeats || 0) - (matchingOffer.requestedChildren || 0)),
-                // ✅ cargoCapacity is correct
-                cargoCapacity: Math.max(0, (trip.cargoCapacity || 0) - (matchingOffer.requestedCargo || 0)),
-              };
-              await kv.set(`ovora:trip:${tripId}`, updatedTrip);
-              console.log(`[accept] Trip ${tripId} capacity reduced:`, {
-                seats: `${trip.availableSeats} → ${updatedTrip.availableSeats}`,
-                childSeats: `${trip.childSeats} → ${updatedTrip.childSeats}`,
-                cargo: `${trip.cargoCapacity} → ${updatedTrip.cargoCapacity}`,
-              });
-            } else {
-              console.log(`[accept] Trip ${tripId} not found in KV — capacity not reduced`);
-            }
+            // 2. Capacity already reduced by adjustTripCapacity above
+            console.log(`[accept] Trip ${tripId} capacity reduced via adjustTripCapacity`);
           }
         }
       } catch (err) {
@@ -2996,23 +2976,23 @@ app.put("/make-server-4e36197a/chat/:chatId/proposal/:proposalId", async (c) => 
         if (!tripId) {
           console.log(`[reject] No tripId found in proposal or chatmeta — skipping offer update`);
         } else {
-          // ── Step 3: find the pending offer ──────────────────────────────
+          // ── Step 3: find the pending or accepted offer ──────────────────
           const allOffers: any[] = await kv.getByPrefix(`ovora:offer:`);
 
-          // Pass 1: strict match — tripId + senderEmail
+          // Pass 1: strict match — tripId + senderEmail (pending or accepted)
           let matchingOffer = allOffers.find((o: any) =>
             o &&
             String(o.tripId) === String(tripId) &&
-            o.status === 'pending' &&
+            (o.status === 'pending' || o.status === 'accepted') &&
             senderEmail && o.senderEmail === senderEmail
           );
 
-          // Pass 2: fallback — tripId only (in case senderEmail differs)
+          // Pass 2: fallback — tripId only (pending or accepted)
           if (!matchingOffer) {
             matchingOffer = allOffers.find((o: any) =>
               o &&
               String(o.tripId) === String(tripId) &&
-              o.status === 'pending'
+              (o.status === 'pending' || o.status === 'accepted')
             );
             if (matchingOffer) {
               console.log(`[reject] Found offer via fallback (tripId only), senderEmail=${matchingOffer.senderEmail}`);
@@ -3020,6 +3000,11 @@ app.put("/make-server-4e36197a/chat/:chatId/proposal/:proposalId", async (c) => 
           }
 
           if (matchingOffer) {
+            // W2: Restore capacity if this offer was previously accepted
+            if (matchingOffer.status === 'accepted' && tripId) {
+              await restoreTripCapacity(tripId, matchingOffer, `chat reject/${matchingOffer.offerId}`);
+            }
+
             // Mark offer as declined (using 'declined' to match TripDetail expectations)
             const offerKey = `ovora:offer:${matchingOffer.tripId}:${matchingOffer.offerId}`;
             await kv.set(offerKey, { 
@@ -5234,18 +5219,9 @@ app.put("/make-server-4e36197a/admin/offers/:tripId/:offerId/status", async (c) 
       if (existing.driverEmail) await kv.del(`ovora:driveroffers:${existing.driverEmail}:${offerId}`).catch(() => {});
       if (existing.senderEmail) await kv.del(`ovora:senderoffers:${existing.senderEmail}:${offerId}`).catch(() => {});
 
-      // Возвращаем вместимость поездке, если отменяем ранее принятую оферту
+      // W2: Restore capacity via adjustTripCapacity (clamped, with retry)
       if (existing.status === 'accepted') {
-        const trip: any = await kv.get(`ovora:trip:${tripId}`);
-        if (trip) {
-          await kv.set(`ovora:trip:${tripId}`, {
-            ...trip,
-            availableSeats: (trip.availableSeats || 0) + (existing.requestedSeats || 0),
-            childSeats: (trip.childSeats || 0) + (existing.requestedChildren || 0),
-            cargoCapacity: (trip.cargoCapacity || 0) + (existing.requestedCargo || 0),
-          });
-          console.log(`[PUT /admin/offers] Restored capacity on trip ${tripId} after admin override`);
-        }
+        await restoreTripCapacity(tripId, existing, `admin/${offerId}`);
       }
     }
 
