@@ -6,6 +6,7 @@ import { toast } from 'sonner';
 // @ts-ignore — Vite virtual module resolved at build time
 import { projectId, publicAnonKey } from '/utils/supabase/info';
 import { CSRF_HEADER, CSRF_TOKEN } from '../api/csrfToken';
+import { withUserToken } from '../api/userToken';
 
 const BASE = `https://${projectId}.supabase.co/functions/v1/make-server-4e36197a`;
 const H = { 'Content-Type': 'application/json', Authorization: `Bearer ${publicAnonKey}`, [CSRF_HEADER]: CSRF_TOKEN };
@@ -57,7 +58,7 @@ function ReportModal({ border, onClose, onSuccess }: { border: Border; onClose: 
     setLoading(true);
     try {
       const res = await fetch(`${BASE}/borders/${border.id}/report`, {
-        method: 'POST', headers: H,
+        method: 'POST', headers: withUserToken(H),
         body: JSON.stringify({ userEmail, userName, status, queueMin, queueTrucks, text }),
       });
       const data = await res.json();
@@ -287,7 +288,7 @@ export function BordersPage() {
 
   const load = useCallback(async () => {
     try {
-      const res = await fetch(`${BASE}/borders`, { headers: H });
+      const res = await fetch(`${BASE}/borders`, { headers: withUserToken(H) });
       const data = await res.json();
       if (data.borders) setBorders(data.borders);
     } catch {

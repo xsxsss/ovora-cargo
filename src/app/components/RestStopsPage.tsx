@@ -10,6 +10,7 @@ import { toast } from 'sonner';
 import { projectId, publicAnonKey } from '/utils/supabase/info';
 import { ImageWithFallback } from './figma/ImageWithFallback';
 import { CSRF_HEADER, CSRF_TOKEN } from '../api/csrfToken';
+import { withUserToken } from '../api/userToken';
 
 const BASE = `https://${projectId}.supabase.co/functions/v1/make-server-4e36197a`;
 const H = { 'Content-Type': 'application/json', Authorization: `Bearer ${publicAnonKey}`, [CSRF_HEADER]: CSRF_TOKEN };
@@ -74,7 +75,7 @@ function ReviewModal({ stop, onClose, onSuccess }: { stop: RestStop; onClose: ()
     setLoading(true);
     try {
       const res = await fetch(`${BASE}/rest-stops/${stop.id}/review`, {
-        method: 'POST', headers: H,
+        method: 'POST', headers: withUserToken(H),
         body: JSON.stringify({ userEmail, userName, rating, text }),
       });
       const data = await res.json();
@@ -236,7 +237,7 @@ export function RestStopsPage() {
 
   const load = useCallback(async () => {
     try {
-      const res = await fetch(`${BASE}/rest-stops`, { headers: H });
+      const res = await fetch(`${BASE}/rest-stops`, { headers: withUserToken(H) });
       const data = await res.json();
       if (data.places) setStops(data.places);
     } catch { /* ignore */ }

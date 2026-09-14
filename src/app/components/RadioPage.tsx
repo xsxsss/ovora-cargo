@@ -6,6 +6,7 @@ import { toast } from 'sonner';
 // @ts-ignore — Vite virtual module resolved at build time
 import { projectId, publicAnonKey } from '/utils/supabase/info';
 import { CSRF_HEADER, CSRF_TOKEN } from '../api/csrfToken';
+import { withUserToken } from '../api/userToken';
 
 const BASE = `https://${projectId}.supabase.co/functions/v1/make-server-4e36197a`;
 const H    = { 'Content-Type': 'application/json', Authorization: `Bearer ${publicAnonKey}`, [CSRF_HEADER]: CSRF_TOKEN };
@@ -191,7 +192,7 @@ export function RadioPage() {
   const [channels,  setChannels]  = useState<Channel[]>([FALLBACK_CHANNEL]);
   const [channel,   setChannel]   = useState<Channel>(FALLBACK_CHANNEL);
   useEffect(() => {
-    fetch(`${BASE}/radio/channels`, { headers: H })
+    fetch(`${BASE}/radio/channels`, { headers: withUserToken(H) })
       .then(r => r.json())
       .then((data: { channels?: Channel[] }) => {
         const list = data.channels || [];
@@ -225,7 +226,7 @@ export function RadioPage() {
 
   const loadMessages = useCallback(async () => {
     try {
-      const res  = await fetch(`${BASE}/radio/channels/${channel.id}/messages?limit=30`, { headers: H });
+      const res  = await fetch(`${BASE}/radio/channels/${channel.id}/messages?limit=30`, { headers: withUserToken(H) });
       const data = await res.json();
       if (data.messages) {
         setMessages(_prev => {
@@ -250,7 +251,7 @@ export function RadioPage() {
     const scroller = scrollRef.current;
     const prevScrollHeight = scroller?.scrollHeight || 0;
     try {
-      const res  = await fetch(`${BASE}/radio/channels/${channel.id}/messages?limit=30&before=${oldestTs}`, { headers: H });
+      const res  = await fetch(`${BASE}/radio/channels/${channel.id}/messages?limit=30&before=${oldestTs}`, { headers: withUserToken(H) });
       const data = await res.json();
       if (data.messages && data.messages.length > 0) {
         setMessages(prev => [...data.messages, ...prev]);
@@ -270,7 +271,7 @@ export function RadioPage() {
   useEffect(() => {
     if (!userEmail || !channel.id) return;
     const beat = () => fetch(`${BASE}/radio/channels/${channel.id}/heartbeat`, {
-      method: 'POST', headers: H,
+      method: 'POST', headers: withUserToken(H),
       body: JSON.stringify({ userEmail, userName, userRole }),
     }).catch(() => {});
     beat();
@@ -281,7 +282,7 @@ export function RadioPage() {
   // Presence: poll online users every 10s
   useEffect(() => {
     if (!channel.id) return;
-    const load = () => fetch(`${BASE}/radio/channels/${channel.id}/presence`, { headers: H })
+    const load = () => fetch(`${BASE}/radio/channels/${channel.id}/presence`, { headers: withUserToken(H) })
       .then(r => r.json())
       .then((data: { users?: any[] }) => { if (data.users) setOnline(data.users); })
       .catch(() => {});
@@ -343,7 +344,7 @@ export function RadioPage() {
     form.append('userEmail', userEmail);
     const res  = await fetch(`${BASE}/radio/voice-upload`, {
       method: 'POST',
-      headers: { Authorization: `Bearer ${publicAnonKey}`, [CSRF_HEADER]: CSRF_TOKEN },
+      headers: withUserToken({ Authorization: `Bearer ${publicAnonKey}`, [CSRF_HEADER]: CSRF_TOKEN }),
       body: form,
     });
     let data: any = {};
@@ -362,7 +363,7 @@ export function RadioPage() {
     setMessages(prev => [...prev, optimistic]);
     try {
       const res  = await fetch(`${BASE}/radio/channels/${channel.id}/messages`, {
-        method: 'POST', headers: H,
+        method: 'POST', headers: withUserToken(H),
         body: JSON.stringify({ userEmail, userName, userRole, type: 'text', text: trimmed }),
       });
       const data = await res.json();
@@ -382,7 +383,7 @@ export function RadioPage() {
     try {
       const audioUrl = await uploadVoice(b, duration);
       const res = await fetch(`${BASE}/radio/channels/${channel.id}/messages`, {
-        method: 'POST', headers: H,
+        method: 'POST', headers: withUserToken(H),
         body: JSON.stringify({ userEmail, userName, userRole, type: 'voice', audioUrl, audioDuration: duration }),
       });
       const data = await res.json();
@@ -397,7 +398,7 @@ export function RadioPage() {
     setMessages(prev => prev.filter(m => m.id !== msgId));
     setActiveMenu(null);
     await fetch(`${BASE}/radio/channels/${channel.id}/messages/${msgId}`, {
-      method: 'DELETE', headers: H, body: JSON.stringify({ userEmail }),
+      method: 'DELETE', headers: withUserToken(H), body: JSON.stringify({ userEmail }),
     }).catch(() => {});
   };
 
@@ -412,14 +413,14 @@ export function RadioPage() {
       return { ...m, reactions: r };
     }));
     await fetch(`${BASE}/radio/channels/${channel.id}/messages/${msgId}/react`, {
-      method: 'POST', headers: H, body: JSON.stringify({ userEmail, emoji }),
+      method: 'POST', headers: withUserToken(H), body: JSON.stringify({ userEmail, emoji }),
     }).catch(() => {});
   };
 
   const reportMsg = async (msgId: string) => {
     setActiveMenu(null);
     await fetch(`${BASE}/radio/channels/${channel.id}/messages/${msgId}/report`, {
-      method: 'POST', headers: H, body: JSON.stringify({ userEmail, reason: 'spam/inappropriate' }),
+      method: 'POST', headers: withUserToken(H), body: JSON.stringify({ userEmail, reason: 'spam/inappropriate' }),
     }).catch(() => {});
     toast.success('Жалоба отправлена');
   };

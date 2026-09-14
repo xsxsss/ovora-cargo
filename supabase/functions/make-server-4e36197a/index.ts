@@ -6995,7 +6995,8 @@ app.post('/make-server-4e36197a/borders/:id/report', async (c) => {
   try {
     const id = c.req.param('id');
     const body = await c.req.json();
-    const { userEmail, userName, status, queueMin, queueTrucks, text } = body;
+    const { userName, status, queueMin, queueTrucks, text } = body;
+    const userEmail = actingAs(c, body.userEmail);
     if (!userEmail) return c.json({ error: 'userEmail required' }, 400);
     const border: any = await kv.get(`ovora:border:${id}`);
     if (!border) return c.json({ error: 'Border not found' }, 404);
@@ -7067,7 +7068,8 @@ app.post('/make-server-4e36197a/rest-stops/:id/review', async (c) => {
   try {
     const id = c.req.param('id');
     const body = await c.req.json();
-    const { userEmail, userName, rating, text } = body;
+    const { userName, rating, text } = body;
+    const userEmail = actingAs(c, body.userEmail);
     if (!userEmail || !rating) return c.json({ error: 'userEmail and rating required' }, 400);
     const place: any = await kv.get(`ovora:restplace:${id}`);
     if (!place) return c.json({ error: 'Place not found' }, 404);
@@ -7147,7 +7149,8 @@ app.post('/make-server-4e36197a/radio/channels/:channelId/heartbeat', async (c) 
   try {
     const channelId = c.req.param('channelId');
     const body = await c.req.json();
-    const { userEmail, userName, userRole } = body;
+    const { userName, userRole } = body;
+    const userEmail = actingAs(c, body.userEmail);
     if (!userEmail) return c.json({ error: 'userEmail required' }, 400);
     const safeKey = userEmail.replace(/[^a-z0-9]/gi, '_').substring(0, 60);
     await kv.set(`ovora:radio:presence:${channelId}:${safeKey}`, {
@@ -7176,7 +7179,8 @@ app.post('/make-server-4e36197a/radio/channels/:channelId/messages', async (c) =
   try {
     const channelId = c.req.param('channelId');
     const body = await c.req.json();
-    const { userEmail, userName, userRole, type, text, audioUrl, audioDuration } = body;
+    const { userName, userRole, type, text, audioUrl, audioDuration } = body;
+    const userEmail = actingAs(c, body.userEmail);
     const msgType: 'text' | 'voice' = type === 'voice' ? 'voice' : 'text';
 
     if (!userEmail) return c.json({ error: 'userEmail required' }, 400);
@@ -7224,7 +7228,7 @@ app.post('/make-server-4e36197a/radio/voice-upload', async (c) => {
   try {
     const form = await c.req.formData();
     const file = form.get('file') as File | null;
-    const userEmail = String(form.get('userEmail') || '');
+    const userEmail = actingAs(c, form.get('userEmail'));
     if (!file) return c.json({ error: 'file required' }, 400);
     if (!userEmail) return c.json({ error: 'userEmail required' }, 400);
     if (file.size > 2_000_000) return c.json({ error: 'file too large (max 2MB)' }, 400);
@@ -7250,7 +7254,7 @@ app.on('DELETE', '/make-server-4e36197a/radio/channels/:channelId/messages/:msgI
   try {
     const channelId = c.req.param('channelId');
     const msgId     = c.req.param('msgId');
-    const { userEmail } = await c.req.json();
+    const userEmail = actingAs(c, (await c.req.json()).userEmail);
     if (!userEmail) return c.json({ error: 'userEmail required' }, 400);
     const msg: any = await kv.get(`ovora:radio:msg:${channelId}:${msgId}`);
     if (!msg) return c.json({ error: 'Message not found' }, 404);
@@ -7267,7 +7271,8 @@ app.post('/make-server-4e36197a/radio/channels/:channelId/messages/:msgId/react'
   try {
     const channelId = c.req.param('channelId');
     const msgId     = c.req.param('msgId');
-    const { userEmail, emoji } = await c.req.json();
+    const { userEmail: _claimedUser, emoji } = await c.req.json();
+    const userEmail = actingAs(c, _claimedUser);
     if (!userEmail || !emoji) return c.json({ error: 'userEmail and emoji required' }, 400);
     const ALLOWED = ['👍','⚠️','✅','🚛','❤️'];
     if (!ALLOWED.includes(emoji)) return c.json({ error: 'emoji not allowed' }, 400);
@@ -7295,7 +7300,8 @@ app.post('/make-server-4e36197a/radio/channels/:channelId/messages/:msgId/report
   try {
     const channelId = c.req.param('channelId');
     const msgId     = c.req.param('msgId');
-    const { userEmail, reason } = await c.req.json();
+    const { userEmail: _claimedUser, reason } = await c.req.json();
+    const userEmail = actingAs(c, _claimedUser);
     if (!userEmail) return c.json({ error: 'userEmail required' }, 400);
     const reportId = `${Date.now()}_${Math.random().toString(36).slice(2,6)}`;
     await kv.set(`ovora:radio:report:${reportId}`, {
