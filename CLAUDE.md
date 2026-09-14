@@ -853,6 +853,92 @@ for (const offer of tripOffers) {
 
 **MiMo: готово, жду проверки Claude.**
 
+#### Дизайн ROOT-2: каскады при удалении пользователя — MiMo 2026-09-14
+
+**Проблема:** `DELETE /admin/users/:email` (`index.ts:5516`) удаляет только `user:email` и
+`user:phone`. Все связанные записи (trips, offers, chats, reviews, notifications) остаются.
+Поездки удалённого водителя видны в поиске — отправитель может отправить заявку несуществующему
+человеку.
+
+**Решение** — добавить cleanup после удаления user-записи, по образцу purgeExpiredTrips:
+
+```ts
+// После kv.del(key) и blacklist:
+
+// 1. Отменить все активные поездки водителя
+const driverTripsIdx: any[] = await kv.getByPrefix(`ovora:drivertrips:${email}:`);
+for (const entry of driverTripsIdx) {
+  if (!entry?.tripId) continue;
+  const trip: any = await kv.get(`ovora:trip:${entry.tripId}`);
+  if (trip && !trip.deletedAt && trip.status !== 'cancelled') {
+    await kv.set(`ovora:trip:${entry.tripId}`, { ...trip, status: 'cancelled', deletedAt: now });
+    // Каскад офферов — через adjustTripCapacity (уже реализован в волне 2)
+    const tripOffers: any[] = await kv.getByPrefix(`ovora:offer:${entry.tripId}:`);
+    for (const offer of tripOffers) {
+      if (!offer || ['cancelled','declined','deleted','rejected'].includes(offer.status)) continue;
+      if (offer.status === 'accepted') await restoreTripCapacity(entry.tripId, offer, `user-delete/${offer.offerId}`);
+      await kv.set(`ovora:offer:${entry.tripId}:${offer.offerId}`, { ...offer, status: 'cancelled', cancelledAt: now });
+    }
+  }
+  await kv.del(`ovora:drivertrips:${email}:${entry.tripId}`).catch(() => {});
+}
+
+// 2. Отменить pending cargo-offers от этого водителя
+const driverCargoIdx: any[] = await kv.getByPrefix(`ovora:drivercargooffers:${email}:`);
+for (const entry of driverCargoIdx) {
+  if (!entry?.cargoId || !entry?.offerId) continue;
+  const co: any = await kv.get(`ovora:cargo-offer:${entry.cargoId}:${entry.offerId}`);
+  if (co && co.status === 'pending') {
+    await kv.set(`ovora:cargo-offer:${entry.cargoId}:${entry.offerId}`, { ...co, status: 'cancelled', cancelledAt: now });
+  }
+  await kv.del(`ovora:drivercargooffers:${email}:${entry.offerId}`).catch(() => {});
+}
+
+// 3. Уведомления
+const notifs: any[] = await kv.getByPrefix(`ovora:notification:${email}:`);
+for (const n of notifs) { if (n?.id) await kv.del(`ovora:notification:${email}:${n.id}`).catch(() => {}); }
+
+// 4. Push-подписки и документы — уже сделаны (ROOT-12, коммит TBD)
+```
+
+**Что НЕ трогаем:**
+- Чаты и сообщения — они принадлежат обеим сторонам, удаление сломает переписку второго участника
+- Отзывы — они нужны для рейтинга других водителей
+- Сделки AVIA — другой админский путь
+
+**Что нужно решить:**
+- Уведомлять ли отправителей, чьи pending-офферы на поездки удалённого водителя отменены?
+- Чаты с удалённым пользователем — показывать «Пользователь удалён» или оставить как есть?
+
+#### Дизайн ROOT-6: отзыв JWT токена пользователя — MiMo 2026-09-14
+
+**Проблема:** `userAuth.tsx:18` — `TOKEN_TTL = '30d'`. Нет endpoint logout, нет per-user
+revocation. Перехваченный токен живёт 30 дней.
+
+**Решение** — минимальный logout endpoint + per-user revocation timestamp:
+
+```ts
+// Новый endpoint: POST /auth/logout
+// Header: X-User-Token (как все авторизованные запросы)
+// Логика: записать ovora:user:token_revoked:{email} = { ts: Date.now() }
+// verifiedEmailFromToken() проверяет: если token.iat < revoked.ts → отклонить
+
+// В userAuth.tsx — добавить проверку в verifiedEmailFromToken():
+const revoked: any = await kv.get(`ovora:user:token_revoked:${email}`);
+if (revoked?.ts && token.iat * 1000 < revoked.ts) {
+  return null; // токен отозван
+}
+```
+
+**Что это решает:**
+- Выход из аккаунта отзывает токен немедленно
+- Админ может заблокировать пользователя — активные токены перестают работать
+- 30-дневный TTL остаётся для удобства, но теперь есть экстренный отзыв
+
+**Что НЕ меняем:**
+- TTL не уменьшаем (30 дней — для PWA удобство)
+- Не добавляем blacklist токенов (per-user timestamp достаточно)
+
 #### Проверка Claude: дизайн волны 2 v3 — ПРИНЯТ — 2026-09-14
 
 **Дизайн готов. Со стороны Claude возражений нет — можно писать код, как только одобрит
