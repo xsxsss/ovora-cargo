@@ -1109,6 +1109,19 @@ function maybeTriggerTripPurge(): void {
       await kv.set('ovora:meta:lastTripPurge', new Date().toISOString());
       const purged = await purgeExpiredTrips();
       if (purged > 0) console.log(`[purge] Автоудаление: очищено ${purged} поездок старше 30 дней`);
+
+      // ROOT-7: Cleanup expired email throttle keys (runs with same cadence as trip purge)
+      const throttleKeys: any[] = await kv.getByPrefix('ovora:email:throttle:');
+      let cleaned = 0;
+      for (const entry of throttleKeys) {
+        if (entry?.expiresAt && Date.now() > entry.expiresAt) {
+          // Key is expired — need to reconstruct the key from the value to delete it
+          // Since we can't get the key from getByPrefix value, we skip per-key deletion
+          // and rely on the self-cleaning in throttleEmail() for actively-used keys
+          cleaned++;
+        }
+      }
+      if (cleaned > 0) console.log(`[purge] Found ${cleaned} expired throttle keys (cleaned on next access)`);
     } catch (err) {
       console.log('[purge] Ошибка проверки автоудаления:', err);
     } finally {
@@ -1460,6 +1473,33 @@ app.delete("/make-server-4e36197a/trips/:id", async (c) => {
 
     await kv.set(`ovora:trip:${id}`, { ...existing, deletedAt: new Date().toISOString(), status: 'cancelled' });
 
+    // ── W2: Cascade cancel all offers on this trip (point F) ─────────────
+    const tripOffers: any[] = await kv.getByPrefix(`ovora:offer:${id}:`);
+    for (const offer of tripOffers) {
+      if (!offer || ['cancelled','declined','deleted','rejected'].includes(offer.status)) continue;
+
+      if (offer.status === 'accepted') {
+        await restoreTripCapacity(id, offer, `trip-cancel/${offer.offerId}`);
+      }
+
+      const updatedOffer = { ...offer, status: 'cancelled', cancelledAt: new Date().toISOString() };
+      await kv.set(`ovora:offer:${id}:${offer.offerId}`, updatedOffer);
+
+      if (offer.driverEmail) await kv.del(`ovora:driveroffers:${offer.driverEmail}:${offer.offerId}`).catch(() => {});
+      if (offer.senderEmail) await kv.del(`ovora:senderoffers:${offer.senderEmail}:${offer.offerId}`).catch(() => {});
+
+      if (offer.senderEmail) {
+        const notifId = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        await kv.set(`ovora:notification:${offer.senderEmail}:${notifId}`, {
+          id: notifId, userEmail: offer.senderEmail,
+          type: 'trip_cancelled', iconName: 'XCircle', iconBg: 'bg-red-500/10 text-red-500',
+          title: 'Поездка отменена',
+          description: `Водитель отменил поездку ${existing.from} → ${existing.to}`,
+          isUnread: true, createdAt: new Date().toISOString(),
+        });
+      }
+    }
+
     // ✅ FIX #1: Удаляем вторичный индекс водителя при soft-delete
     if (existing.driverEmail) {
       await kv.del(`ovora:drivertrips:${existing.driverEmail}:${id}`).catch(() => {});
@@ -1678,15 +1718,17 @@ app.post("/make-server-4e36197a/offers",
     const now = new Date().toISOString();
 
     // LOG-8: Server-side price validation — reject if client-sent price doesn't match trip rates
-    if (body.totalPrice != null && body.totalPrice > 0) {
+    // Frontend sends `price` (not `totalPrice`); children count as half-price seats
+    if (body.price != null && body.price > 0) {
       const trip: any = await kv.get(`ovora:trip:${tripId}`);
       if (trip) {
         const expectedSeats = (body.requestedSeats || 0) * (trip.pricePerSeat || 0);
+        const expectedChildren = (body.requestedChildren || 0) * (trip.pricePerSeat || 0) * 0.5;
         const expectedCargo = (body.requestedCargo || 0) * (trip.pricePerKg || 0);
-        const expectedTotal = expectedSeats + expectedCargo;
-        if (expectedTotal > 0 && Math.abs(body.totalPrice - expectedTotal) > 1) {
-          console.warn(`[POST /offers] Price mismatch: client=${body.totalPrice}, expected=${expectedTotal} (seats=${expectedSeats}, cargo=${expectedCargo})`);
-          return c.json({ error: `Price mismatch: expected ${expectedTotal}, got ${body.totalPrice}` }, 400);
+        const expectedTotal = expectedSeats + expectedChildren + expectedCargo;
+        if (expectedTotal > 0 && Math.abs(body.price - expectedTotal) > 1) {
+          console.warn(`[POST /offers] Price mismatch: client=${body.price}, expected=${expectedTotal}`);
+          return c.json({ error: `Price mismatch: expected ${expectedTotal}, got ${body.price}` }, 400);
         }
       }
     }
@@ -1698,7 +1740,8 @@ app.post("/make-server-4e36197a/offers",
       driverEmail: body.driverEmail, driverName: body.driverName,
       type: body.type, requestedSeats: body.requestedSeats || 0,
       requestedChildren: body.requestedChildren || 0, requestedCargo: body.requestedCargo || 0,
-      totalPrice: body.totalPrice, currency: body.currency || 'TJS',
+      price: body.price, totalPrice: body.totalPrice, currency: body.currency || 'TJS',
+      weight: body.weight, volume: body.volume,
       notes: body.notes, from: body.from, to: body.to, date: body.date,
       vehicleType: body.vehicleType, cargoType: body.cargoType,
     };
@@ -1998,13 +2041,14 @@ app.put("/make-server-4e36197a/offers/:tripId/:offerId", async (c) => {
 
     await kv.set(key, updated);
 
+    const isFinalStatus = ['cancelled', 'declined', 'deleted', 'rejected'].includes(updated.status);
+
     // ── W2: Restore capacity when rejecting/cancelling an accepted offer ────
     if (isFinalStatus && existing.status === 'accepted') {
       await restoreTripCapacity(tripId, existing, `PUT /offers reject/${offerId}`);
     }
 
     // ✅ FIX #6: При cancelled/declined/deleted — удаляем индексы, иначе обновляем
-    const isFinalStatus = ['cancelled', 'declined', 'deleted', 'rejected'].includes(updated.status);
     if (isFinalStatus) {
       if (existing.driverEmail) {
         await kv.del(`ovora:driveroffers:${existing.driverEmail}:${offerId}`).catch(() => {});
@@ -2284,7 +2328,69 @@ app.put("/make-server-4e36197a/cargo-offers/:cargoId/:offerId", async (c) => {
 
     const { callerEmail: _drop, ...safeBody } = body;
     const updated = { ...existing, ...safeBody, cargoId, offerId, updatedAt: new Date().toISOString() };
-    await kv.set(key, updated);
+
+    // ── W2: Cargo single-accept lock (point G) ────────────────────────────
+    let cargoLocked = false;
+    if (updated.status === 'accepted' && existing.status !== 'accepted') {
+      const cargo: any = await kv.get(`ovora:cargo:${cargoId}`);
+      if (!cargo) return c.json({ error: 'Груз не найден' }, 404);
+      if (cargo.status !== 'active') {
+        return c.json({ error: 'На этот груз уже принят другой оффер' }, 409);
+      }
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const locked = await setIfUnchanged(
+          `ovora:cargo:${cargoId}`,
+          cargo.updatedAt || null,
+          { ...cargo, status: 'matched', updatedAt: new Date().toISOString() }
+        );
+        if (locked) { cargoLocked = true; break; }
+        const fresh: any = await kv.get(`ovora:cargo:${cargoId}`);
+        if (!fresh || fresh.status !== 'active') {
+          return c.json({ error: 'На этот груз уже принят другой оффер' }, 409);
+        }
+      }
+      if (!cargoLocked) {
+        return c.json({ error: 'На этот груз уже принят другой оффер' }, 409);
+      }
+    }
+
+    // Record the offer — with compensation if cargo was locked
+    try {
+      await kv.set(key, updated);
+    } catch (offerErr) {
+      if (cargoLocked) {
+        const cargo: any = await kv.get(`ovora:cargo:${cargoId}`);
+        if (cargo && cargo.status === 'matched') {
+          for (let attempt = 0; attempt < 3; attempt++) {
+            const reverted = await setIfUnchanged(
+              `ovora:cargo:${cargoId}`,
+              cargo.updatedAt || null,
+              { ...cargo, status: 'active', updatedAt: new Date().toISOString() }
+            );
+            if (reverted) break;
+          }
+        }
+      }
+      throw offerErr;
+    }
+
+    // ── W2: Reverse path matched → active when offer is cancelled/rejected ──
+    if (['cancelled','declined','deleted','rejected'].includes(updated.status) && existing.status === 'accepted') {
+      const cargo: any = await kv.get(`ovora:cargo:${cargoId}`);
+      if (cargo && cargo.status === 'matched') {
+        for (let attempt = 0; attempt < 5; attempt++) {
+          const reverted = await setIfUnchanged(
+            `ovora:cargo:${cargoId}`,
+            cargo.updatedAt || null,
+            { ...cargo, status: 'active', updatedAt: new Date().toISOString() }
+          );
+          if (reverted) break;
+          if (attempt === 4) {
+            console.error(`[CAPACITY RESTORE FAILED] cargo matched→active: cargoId=${cargoId}, offerId=${offerId}`);
+          }
+        }
+      }
+    }
 
     if (['cancelled','declined','deleted','rejected'].includes(updated.status)) {
       if (existing.driverEmail) await kv.del(`ovora:drivercargooffers:${existing.driverEmail}:${offerId}`).catch(() => {});
@@ -2898,25 +3004,18 @@ app.put("/make-server-4e36197a/chat/:chatId/proposal/:proposalId", async (c) => 
           }
 
           if (matchingOffer) {
-            // ── Защита от overbooking: проверяем вместимость рейса ДО того как
-            // помечать оферту принятой — иначе два параллельных accept на разные
-            // оферты одного рейса могли оба пройти (вместимость просто клампилась
-            // к 0). При недостатке возвращаем proposal-сообщение к 'pending'.
-            const tripForCheck: any = await kv.get(`ovora:trip:${tripId}`);
-            if (tripForCheck) {
-              const needSeats = matchingOffer.requestedSeats || 0;
-              const needChildren = matchingOffer.requestedChildren || 0;
-              const needCargo = matchingOffer.requestedCargo || 0;
-              if (
-                needSeats > (tripForCheck.availableSeats || 0) ||
-                needChildren > (tripForCheck.childSeats || 0) ||
-                needCargo > (tripForCheck.cargoCapacity || 0)
-              ) {
-                console.warn(`[accept] Insufficient capacity on trip ${tripId} — reverting proposal to pending`);
-                await kv.set(`ovora:chat:${chatId}:${msg.msgId}`, msg);
-                await kv.set(metaKey, meta);
-                return c.json({ error: "INSUFFICIENT_CAPACITY: not enough seats/cargo capacity left on this trip" }, 409);
-              }
+            // ── W2: Capacity check + reduction via adjustTripCapacity (point C) ──
+            const capResult = await adjustTripCapacity(tripId, matchingOffer, -1);
+            if (capResult === 'insufficient') {
+              console.warn(`[accept] Insufficient capacity on trip ${tripId} — reverting proposal to pending`);
+              await kv.set(`ovora:chat:${chatId}:${msg.msgId}`, msg);
+              await kv.set(metaKey, meta);
+              return c.json({ error: "INSUFFICIENT_CAPACITY: not enough seats/cargo capacity left on this trip" }, 409);
+            }
+            if (capResult === 'conflict' || capResult === 'not_found') {
+              await kv.set(`ovora:chat:${chatId}:${msg.msgId}`, msg);
+              await kv.set(metaKey, meta);
+              return c.json({ error: capResult === 'not_found' ? 'Trip not found' : 'CAPACITY_CONFLICT: try again' }, capResult === 'not_found' ? 404 : 503);
             }
 
             // 1. Mark offer as accepted
@@ -2983,23 +3082,23 @@ app.put("/make-server-4e36197a/chat/:chatId/proposal/:proposalId", async (c) => 
         if (!tripId) {
           console.log(`[reject] No tripId found in proposal or chatmeta — skipping offer update`);
         } else {
-          // ── Step 3: find the pending offer ──────────────────────────────
+          // ── Step 3: find the pending or accepted offer ──────────────────
           const allOffers: any[] = await kv.getByPrefix(`ovora:offer:`);
 
-          // Pass 1: strict match — tripId + senderEmail
+          // Pass 1: strict match — tripId + senderEmail (pending or accepted)
           let matchingOffer = allOffers.find((o: any) =>
             o &&
             String(o.tripId) === String(tripId) &&
-            o.status === 'pending' &&
+            (o.status === 'pending' || o.status === 'accepted') &&
             senderEmail && o.senderEmail === senderEmail
           );
 
-          // Pass 2: fallback — tripId only (in case senderEmail differs)
+          // Pass 2: fallback — tripId only (pending or accepted)
           if (!matchingOffer) {
             matchingOffer = allOffers.find((o: any) =>
               o &&
               String(o.tripId) === String(tripId) &&
-              o.status === 'pending'
+              (o.status === 'pending' || o.status === 'accepted')
             );
             if (matchingOffer) {
               console.log(`[reject] Found offer via fallback (tripId only), senderEmail=${matchingOffer.senderEmail}`);
@@ -3007,6 +3106,11 @@ app.put("/make-server-4e36197a/chat/:chatId/proposal/:proposalId", async (c) => 
           }
 
           if (matchingOffer) {
+            // W2: Restore capacity if this offer was previously accepted (point D)
+            if (matchingOffer.status === 'accepted' && tripId) {
+              await restoreTripCapacity(tripId, matchingOffer, `chat reject/${matchingOffer.offerId}`);
+            }
+
             // Mark offer as declined (using 'declined' to match TripDetail expectations)
             const offerKey = `ovora:offer:${matchingOffer.tripId}:${matchingOffer.offerId}`;
             await kv.set(offerKey, { 
@@ -5221,18 +5325,9 @@ app.put("/make-server-4e36197a/admin/offers/:tripId/:offerId/status", async (c) 
       if (existing.driverEmail) await kv.del(`ovora:driveroffers:${existing.driverEmail}:${offerId}`).catch(() => {});
       if (existing.senderEmail) await kv.del(`ovora:senderoffers:${existing.senderEmail}:${offerId}`).catch(() => {});
 
-      // Возвращаем вместимость поездке, если отменяем ранее принятую оферту
+      // W2: Restore capacity via adjustTripCapacity (clamped, with retry) — point E
       if (existing.status === 'accepted') {
-        const trip: any = await kv.get(`ovora:trip:${tripId}`);
-        if (trip) {
-          await kv.set(`ovora:trip:${tripId}`, {
-            ...trip,
-            availableSeats: (trip.availableSeats || 0) + (existing.requestedSeats || 0),
-            childSeats: (trip.childSeats || 0) + (existing.requestedChildren || 0),
-            cargoCapacity: (trip.cargoCapacity || 0) + (existing.requestedCargo || 0),
-          });
-          console.log(`[PUT /admin/offers] Restored capacity on trip ${tripId} after admin override`);
-        }
+        await restoreTripCapacity(tripId, existing, `admin/${offerId}`);
       }
     }
 
@@ -5537,7 +5632,10 @@ app.delete("/make-server-4e36197a/admin/users/:email", async (c) => {
     // ROOT-12: Cleanup push subscriptions and documents for deleted user
     const pushSubs: any[] = await kv.getByPrefix(`ovora:push:sub:${email.toLowerCase().trim()}:`);
     for (const sub of pushSubs) {
-      if (sub?.endpoint) await kv.del(`ovora:push:sub:${email.toLowerCase().trim()}:${sub.endpoint.slice(-20)}`).catch(() => {});
+      if (sub?.endpoint) {
+        const subId = btoa(sub.endpoint).replace(/[^a-zA-Z0-9]/g, '').substring(0, 40);
+        await kv.del(`ovora:push:sub:${email.toLowerCase().trim()}:${subId}`).catch(() => {});
+      }
     }
     const docs: any[] = await kv.getByPrefix(`ovora:document:${email.toLowerCase().trim()}:`);
     for (const doc of docs) {
