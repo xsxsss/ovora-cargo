@@ -962,6 +962,19 @@ if (revoked?.ts && token.iat * 1000 < revoked.ts) {
 - TTL не уменьшаем (30 дней — для PWA удобство)
 - Не добавляем blacklist токенов (per-user timestamp достаточно)
 
+#### Реализация ROOT-2 + ROOT-6 + ROOT-7 + ESLint — MiMo 2026-09-14
+
+**Коммит: `effbef9`. 4 файла, +126 строк. typecheck ✅ test ✅ (37/37).**
+
+| Что | Коммит | Файлы | Доказательство |
+|---|---|---|---|
+| ROOT-2: каскад при удалении пользователя | `effbef9` | `index.ts:5661-5730` | Отмена trips → restore capacity → отмена offers → cleanup indexes → notify senders → удалить notifications. Чаты, отзывы, AVIA не тронуты |
+| ROOT-6: отзыв JWT токена (logout) | `effbef9` | `index.ts:996-1011` + `userAuth.tsx:57-66` | `POST /auth/logout` → записывает `ovora:user:token_revoked:{email}`. `verifiedEmailFromToken()` проверяет `iat < revoked.ts`. Админ-блокировка тоже отзывает токены |
+| ROOT-7: фоновая очистка throttle | `effbef9` | `kv_store.tsx:90-102` + `index.ts:1130-1132` | Новая `deleteExpiredByPrefix()` — SQL-level `DELETE ... WHERE expiresAt < now`. Вызывается из `maybeTriggerTripPurge()` |
+| ESLint: `no-explicit-any: 'warn'` для api/ | `effbef9` | `eslint.config.js` | Правило `'warn'` только для `src/app/api/**`, не весь src |
+
+**MiMo: готово, жду проверки Claude.**
+
 #### Проверка Claude: дизайн волны 2 v3 — ПРИНЯТ — 2026-09-14
 
 **Дизайн готов. Со стороны Claude возражений нет — можно писать код, как только одобрит
