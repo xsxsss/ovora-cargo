@@ -59,10 +59,10 @@ export async function verifiedEmailFromToken(c: any): Promise<string | null> {
     const email = typeof payload.email === 'string' ? payload.email : null;
     if (!email) return null;
 
-    // ROOT-6: check per-user token revocation (logout / admin block)
-    const revoked: any = await kv.get(`ovora:user:token_revoked:${email}`);
+    // ROOT-6: токены, выданные раньше метки отзыва, недействительны
+    const revoked: any = await kv.get(revokedKey(email));
     if (revoked?.ts && (payload.iat ?? 0) * 1000 < revoked.ts) {
-      return null; // token was issued before revocation
+      return null;
     }
 
     return email;
@@ -70,6 +70,19 @@ export async function verifiedEmailFromToken(c: any): Promise<string | null> {
     console.warn('[User Auth] Invalid/expired user JWT:', err);
     return null;
   }
+}
+
+function revokedKey(email: string): string {
+  return `ovora:user:token_revoked:${normEmail(email)}`;
+}
+
+/**
+ * Отзывает все токены пользователя на всех устройствах (блокировка, удаление, «выйти везде»).
+ * Метка округляется вниз до секунды, как iat в JWT: иначе токен нового входа,
+ * выданный в ту же секунду, оказался бы «раньше» отзыва и был бы отклонён.
+ */
+export async function revokeUserTokens(email: string): Promise<void> {
+  await kv.set(revokedKey(email), { ts: Math.floor(Date.now() / 1000) * 1000 });
 }
 
 /**

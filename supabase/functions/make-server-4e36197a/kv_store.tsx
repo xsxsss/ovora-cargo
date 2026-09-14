@@ -87,18 +87,25 @@ export const getByPrefix = async (prefix: string): Promise<any[]> => {
   return data?.map((d) => d.value) ?? [];
 };
 
-// Delete all keys matching a prefix where the value's expiresAt is in the past.
-export const deleteExpiredByPrefix = async (prefix: string): Promise<number> => {
+// Delete keys under a prefix whose value matches isExpired. The check runs in code:
+// expiresAt is stored as epoch millis, and a SQL text comparison against a date
+// string would match every row.
+export const deleteByPrefixWhere = async (
+  prefix: string,
+  isExpired: (value: any) => boolean,
+): Promise<number> => {
   const supabase = client();
   const escaped = prefix.replace(/[%_]/g, (ch) => `\\${ch}`);
   const { data, error } = await supabase
     .from('kv_store_4e36197a')
-    .delete()
-    .like('key', escaped + '%')
-    .lt('value->>expiresAt', new Date().toISOString())
-    .select('key');
+    .select('key, value')
+    .like('key', escaped + '%');
   if (error) throw new Error(error.message);
-  return data?.length ?? 0;
+  const keys = (data ?? []).filter((d) => isExpired(d.value)).map((d) => d.key);
+  for (let i = 0; i < keys.length; i += 200) {
+    await mdel(keys.slice(i, i + 200));
+  }
+  return keys.length;
 };
 
 // Conditional write: updates value only if the current updatedAt matches expectedUpdatedAt.

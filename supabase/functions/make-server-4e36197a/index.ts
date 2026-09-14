@@ -1,6 +1,6 @@
 import { Hono } from "npm:hono";
 import { setupAviaRoutes } from "./aviaRoutes.tsx";
-import { signUserToken, verifiedEmailFromToken, userAuthEnabled } from "./userAuth.tsx";
+import { signUserToken, verifiedEmailFromToken, userAuthEnabled, revokeUserTokens } from "./userAuth.tsx";
 import { cors } from "npm:hono/cors";
 import { logger } from "npm:hono/logger";
 import { createClient } from "npm:@supabase/supabase-js";
@@ -25,7 +25,7 @@ import { getLoginDevices } from "./deviceInfo.tsx";
 import { handleSendOtp, handleVerifyOtp } from "./otp.tsx";
 import { handleEmailCheck, handleSetCode, handleVerifyPermCode, handleResetCode, handleAdminListCodes, handleSendEmailCode, handleVerifyEmailCode } from "./permCode.tsx";
 import {
-  sendEmail, throttleEmail, setUnsubscribed,
+  sendEmail, throttleEmail, setUnsubscribed, purgeExpiredThrottleKeys,
   welcomeTemplate, newOfferTemplate,
   offerAcceptedTemplate, offerRejectedTemplate,
   tripCompletedTemplate, newMessageTemplate,
@@ -98,6 +98,196 @@ async function restoreTripCapacity(
   if (result !== 'ok') {
     console.error(`[CAPACITY RESTORE FAILED] ${context}: tripId=${tripId}, result=${result}, offer=${JSON.stringify(offer)}`);
   }
+}
+
+// Atomic cargo status transition. Re-reads the cargo on every attempt so a lost
+// race is retried against fresh updatedAt instead of the same stale value.
+async function transitionCargoStatus(
+  cargoId: string,
+  from: string,
+  to: string,
+  maxRetries: number,
+): Promise<'ok' | 'wrong_status' | 'conflict' | 'not_found'> {
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    const cargo: any = await kv.get(`ovora:cargo:${cargoId}`);
+    if (!cargo) return 'not_found';
+    if (cargo.status !== from) return 'wrong_status';
+    const written = await setIfUnchanged(
+      `ovora:cargo:${cargoId}`,
+      cargo.updatedAt || null,
+      { ...cargo, status: to, updatedAt: new Date().toISOString() },
+    );
+    if (written) return 'ok';
+  }
+  return 'conflict';
+}
+
+async function releaseCargo(cargoId: string, context: string): Promise<void> {
+  const result = await transitionCargoStatus(cargoId, 'matched', 'active', 5);
+  if (result === 'conflict') {
+    console.error(`[CARGO RELEASE FAILED] ${context}: cargoId=${cargoId} stuck in matched`);
+  }
+}
+
+// ── Каскады отмены ──────────────────────────────────────────────────────────
+const FINAL_OFFER_STATUSES = ['cancelled', 'declined', 'deleted', 'rejected'];
+
+async function notifyCancellation(to: string, title: string, description: string): Promise<void> {
+  const id = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  await kv.set(`ovora:notification:${to}:${id}`, {
+    id, userEmail: to,
+    type: 'trip_cancelled', iconName: 'XCircle', iconBg: 'bg-red-500/10 text-red-500',
+    title, description, isUnread: true, createdAt: new Date().toISOString(),
+  }).catch(() => {});
+}
+
+/** Отменяет оффер на поездку: возврат мест для принятого, статус, индексы. */
+async function cancelTripOffer(tripId: string, offer: any, context: string): Promise<void> {
+  if (offer.status === 'accepted') {
+    await restoreTripCapacity(tripId, offer, `${context}/${offer.offerId}`);
+  }
+  await kv.set(`ovora:offer:${tripId}:${offer.offerId}`, {
+    ...offer, status: 'cancelled', cancelledAt: new Date().toISOString(),
+  });
+  if (offer.driverEmail) await kv.del(`ovora:driveroffers:${offer.driverEmail}:${offer.offerId}`).catch(() => {});
+  if (offer.senderEmail) await kv.del(`ovora:senderoffers:${offer.senderEmail}:${offer.offerId}`).catch(() => {});
+}
+
+/** Отмена поездки водителем: все живые офферы отменяются, отправители уведомляются. */
+async function cancelAllTripOffers(tripId: string, trip: any): Promise<number> {
+  const offers: any[] = await kv.getByPrefix(`ovora:offer:${tripId}:`);
+  let n = 0;
+  for (const offer of offers) {
+    if (!offer?.offerId || FINAL_OFFER_STATUSES.includes(offer.status)) continue;
+    await cancelTripOffer(tripId, offer, 'trip-cancel');
+    if (offer.senderEmail) {
+      await notifyCancellation(offer.senderEmail, 'Поездка отменена',
+        `Водитель отменил поездку ${trip?.from || ''} → ${trip?.to || ''}`);
+    }
+    n++;
+  }
+  return n;
+}
+
+/** Отменяет все живые офферы на груз (груз снят). Водителей с принятым откликом уведомляет. */
+async function cancelCargoOffers(cargoId: string, cargo: any, skipNotify?: string): Promise<number> {
+  const offers: any[] = await kv.getByPrefix(`ovora:cargo-offer:${cargoId}:`);
+  let n = 0;
+  for (const co of offers) {
+    if (!co?.offerId || FINAL_OFFER_STATUSES.includes(co.status)) continue;
+    await kv.set(`ovora:cargo-offer:${cargoId}:${co.offerId}`, {
+      ...co, status: 'cancelled', cancelledAt: new Date().toISOString(),
+    });
+    if (co.driverEmail) await kv.del(`ovora:drivercargooffers:${co.driverEmail}:${co.offerId}`).catch(() => {});
+    if (co.senderEmail) await kv.del(`ovora:sendercargooffers:${co.senderEmail}:${co.offerId}`).catch(() => {});
+    if (co.status === 'accepted' && co.driverEmail && co.driverEmail !== skipNotify) {
+      await notifyCancellation(co.driverEmail, 'Груз снят',
+        `Отправитель снял груз ${cargo?.from || ''} → ${cargo?.to || ''}. Перевозка отменена`);
+    }
+    n++;
+  }
+  return n;
+}
+
+/**
+ * Всё, что должно исчезнуть или отмениться вместе с пользователем. Идемпотентно:
+ * при повторном запуске уже отменённое пропускается. Чаты и отзывы не трогаем —
+ * они принадлежат и второй стороне.
+ */
+async function cascadeDeletedUser(email: string): Promise<Record<string, number>> {
+  const now = new Date().toISOString();
+  const counts = { trips: 0, tripOffers: 0, cargos: 0, cargoOffers: 0, notifications: 0, pushSubs: 0, documents: 0 };
+
+  // 1. Поездки водителя и офферы на них
+  const driverTrips: any[] = await kv.getByPrefix(`ovora:drivertrips:${email}:`);
+  for (const entry of driverTrips) {
+    if (!entry?.tripId) continue;
+    const trip: any = await kv.get(`ovora:trip:${entry.tripId}`);
+    if (trip && !trip.deletedAt && trip.status !== 'cancelled') {
+      await kv.set(`ovora:trip:${entry.tripId}`, { ...trip, status: 'cancelled', deletedAt: now });
+      counts.trips++;
+      const tripOffers: any[] = await kv.getByPrefix(`ovora:offer:${entry.tripId}:`);
+      for (const offer of tripOffers) {
+        if (!offer?.offerId || FINAL_OFFER_STATUSES.includes(offer.status)) continue;
+        await cancelTripOffer(entry.tripId, offer, 'user-delete');
+        counts.tripOffers++;
+        if (offer.senderEmail && offer.senderEmail !== email) {
+          await notifyCancellation(offer.senderEmail, 'Поездка отменена',
+            `Поездка ${trip.from || ''} → ${trip.to || ''} отменена: водитель больше не работает на платформе`);
+        }
+      }
+    }
+    await kv.del(`ovora:drivertrips:${email}:${entry.tripId}`).catch(() => {});
+  }
+
+  // 2. Заявки пользователя на чужие поездки — освобождаем места водителям
+  const senderOffers: any[] = await kv.getByPrefix(`ovora:senderoffers:${email}:`);
+  for (const entry of senderOffers) {
+    if (!entry?.tripId || !entry?.offerId) continue;
+    const offer: any = await kv.get(`ovora:offer:${entry.tripId}:${entry.offerId}`);
+    if (offer && !FINAL_OFFER_STATUSES.includes(offer.status)) {
+      await cancelTripOffer(entry.tripId, offer, 'user-delete');
+      counts.tripOffers++;
+      if (offer.status === 'accepted' && offer.driverEmail && offer.driverEmail !== email) {
+        await notifyCancellation(offer.driverEmail, 'Бронь отменена',
+          `Отправитель ${offer.senderName || ''} больше не на платформе. Места освобождены`);
+      }
+    }
+    await kv.del(`ovora:senderoffers:${email}:${entry.offerId}`).catch(() => {});
+  }
+
+  // 3. Отклики пользователя-водителя на грузы — принятый груз возвращаем в поиск
+  const driverCargoOffers: any[] = await kv.getByPrefix(`ovora:drivercargooffers:${email}:`);
+  for (const entry of driverCargoOffers) {
+    if (!entry?.cargoId || !entry?.offerId) continue;
+    const coKey = `ovora:cargo-offer:${entry.cargoId}:${entry.offerId}`;
+    const co: any = await kv.get(coKey);
+    if (co && !FINAL_OFFER_STATUSES.includes(co.status)) {
+      await kv.set(coKey, { ...co, status: 'cancelled', cancelledAt: now });
+      if (co.senderEmail) await kv.del(`ovora:sendercargooffers:${co.senderEmail}:${entry.offerId}`).catch(() => {});
+      if (co.status === 'accepted') {
+        await releaseCargo(entry.cargoId, `user-delete/${entry.offerId}`);
+        if (co.senderEmail && co.senderEmail !== email) {
+          await notifyCancellation(co.senderEmail, 'Водитель выбыл',
+            'Принятый водитель больше не на платформе. Ваш груз снова виден в поиске');
+        }
+      }
+      counts.cargoOffers++;
+    }
+    await kv.del(`ovora:drivercargooffers:${email}:${entry.offerId}`).catch(() => {});
+  }
+
+  // 4. Грузы пользователя-отправителя и отклики на них
+  const senderCargos: any[] = await kv.getByPrefix(`ovora:sendercargos:${email}:`);
+  for (const entry of senderCargos) {
+    if (!entry?.cargoId) continue;
+    const cargo: any = await kv.get(`ovora:cargo:${entry.cargoId}`);
+    if (cargo && !cargo.deletedAt) {
+      await kv.set(`ovora:cargo:${entry.cargoId}`, { ...cargo, status: 'cancelled', deletedAt: now, updatedAt: now });
+      counts.cargos++;
+      counts.cargoOffers += await cancelCargoOffers(entry.cargoId, cargo, email);
+    }
+    await kv.del(`ovora:sendercargos:${email}:${entry.cargoId}`).catch(() => {});
+  }
+
+  // 5. Личные записи: уведомления, push-подписки, документы
+  const notifs: any[] = await kv.getByPrefix(`ovora:notification:${email}:`);
+  for (const n of notifs) {
+    if (n?.id) { await kv.del(`ovora:notification:${email}:${n.id}`).catch(() => {}); counts.notifications++; }
+  }
+  const pushSubs: any[] = await kv.getByPrefix(`ovora:push:sub:${email}:`);
+  for (const sub of pushSubs) {
+    if (!sub?.endpoint) continue;
+    const subId = btoa(sub.endpoint).replace(/[^a-zA-Z0-9]/g, '').substring(0, 40);
+    await kv.del(`ovora:push:sub:${email}:${subId}`).catch(() => {});
+    counts.pushSubs++;
+  }
+  const docs: any[] = await kv.getByPrefix(`ovora:document:${email}:`);
+  for (const doc of docs) {
+    if (doc?.id) { await kv.del(`ovora:document:${email}:${doc.id}`).catch(() => {}); counts.documents++; }
+  }
+
+  return counts;
 }
 
 // ── Input sanitization helper ──────────────────────────────────────────────
@@ -993,19 +1183,18 @@ app.get("/make-server-4e36197a/auth/user/:email", async (c) => {
   }
 });
 
-// ── ROOT-6: User logout — revoke per-user JWT token ────────────────────────
-// POST /auth/logout — requires X-User-Token header (getCallerEmail extracts email).
-// Writes ovora:user:token_revoked:{email} = { ts: Date.now() } so that all tokens
-// issued before this timestamp are rejected by verifiedEmailFromToken().
-app.post("/make-server-4e36197a/auth/logout", async (c) => {
+// ── ROOT-6: «Выйти на всех устройствах» ─────────────────────────────────────
+// Отзывает ВСЕ токены пользователя. Не подключать к обычной кнопке «Выйти» —
+// она выходит только на текущем устройстве (токен стирается локально).
+app.post("/make-server-4e36197a/auth/logout-all", async (c) => {
   try {
     const email = getCallerEmail(c);
     if (!email) return c.json({ error: "Authentication required" }, 401);
-    await kv.set(`ovora:user:token_revoked:${email}`, { ts: Date.now() });
-    console.log(`[Auth] Token revoked for ${email} (logout)`);
+    await revokeUserTokens(email);
+    console.log(`[Auth] Tokens revoked for ${email} (logout-all)`);
     return c.json({ success: true });
   } catch (err) {
-    console.log("Error POST /auth/logout:", err);
+    console.log("Error POST /auth/logout-all:", err);
     return c.json({ error: 'Внутренняя ошибка сервера' }, 500);
   }
 });
@@ -1128,7 +1317,7 @@ function maybeTriggerTripPurge(): void {
       if (purged > 0) console.log(`[purge] Автоудаление: очищено ${purged} поездок старше 30 дней`);
 
       // ROOT-7: Cleanup expired email throttle keys (runs with same cadence as trip purge)
-      const cleaned = await kv.deleteExpiredByPrefix('ovora:email:throttle:');
+      const cleaned = await purgeExpiredThrottleKeys();
       if (cleaned > 0) console.log(`[purge] Cleaned ${cleaned} expired throttle keys`);
     } catch (err) {
       console.log('[purge] Ошибка проверки автоудаления:', err);
@@ -1399,14 +1588,30 @@ app.put("/make-server-4e36197a/trips/:id", async (c) => {
       cleanedBody.to = cleanAddress(String(cleanedBody.to));
     }
 
-    const updated = { ...existing, ...cleanedBody, id, updatedAt: new Date().toISOString() };
-    
+    const updated: any = { ...existing, ...cleanedBody, id, updatedAt: new Date().toISOString() };
+
     console.log(`[PUT /trips/${id}] Updating trip:`, {
       from: { original: body.from, cleaned: cleanedBody.from },
       to: { original: body.to, cleaned: cleanedBody.to },
     });
-    
-    await kv.set(`ovora:trip:${id}`, updated);
+
+    // Условная запись: обычный kv.set затёр бы списание мест, сделанное параллельным
+    // принятием оффера между нашим чтением и записью.
+    let written = await setIfUnchanged(`ovora:trip:${id}`, existing.updatedAt || null, updated);
+    for (let attempt = 1; !written && attempt < 3; attempt++) {
+      const fresh: any = await kv.get(`ovora:trip:${id}`);
+      if (!fresh) return c.json({ error: "Trip not found" }, 404);
+      if (body.status && fresh.status !== existing.status) {
+        return c.json({ error: "Поездка изменилась, обновите страницу" }, 409);
+      }
+      Object.assign(updated, fresh, cleanedBody, { id, updatedAt: new Date().toISOString() });
+      written = await setIfUnchanged(`ovora:trip:${id}`, fresh.updatedAt || null, updated);
+    }
+    if (!written) return c.json({ error: "CONFLICT: try again" }, 503);
+
+    if (updated.status === 'cancelled' && existing.status !== 'cancelled') {
+      await cancelAllTripOffers(id, updated);
+    }
 
     // ── Email обоим участникам при завершении поездки ─────────────────────────
     if (updated.status === 'completed' && existing.status !== 'completed') {
@@ -1482,31 +1687,7 @@ app.delete("/make-server-4e36197a/trips/:id", async (c) => {
     await kv.set(`ovora:trip:${id}`, { ...existing, deletedAt: new Date().toISOString(), status: 'cancelled' });
 
     // ── W2: Cascade cancel all offers on this trip (point F) ─────────────
-    const tripOffers: any[] = await kv.getByPrefix(`ovora:offer:${id}:`);
-    for (const offer of tripOffers) {
-      if (!offer || ['cancelled','declined','deleted','rejected'].includes(offer.status)) continue;
-
-      if (offer.status === 'accepted') {
-        await restoreTripCapacity(id, offer, `trip-cancel/${offer.offerId}`);
-      }
-
-      const updatedOffer = { ...offer, status: 'cancelled', cancelledAt: new Date().toISOString() };
-      await kv.set(`ovora:offer:${id}:${offer.offerId}`, updatedOffer);
-
-      if (offer.driverEmail) await kv.del(`ovora:driveroffers:${offer.driverEmail}:${offer.offerId}`).catch(() => {});
-      if (offer.senderEmail) await kv.del(`ovora:senderoffers:${offer.senderEmail}:${offer.offerId}`).catch(() => {});
-
-      if (offer.senderEmail) {
-        const notifId = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-        await kv.set(`ovora:notification:${offer.senderEmail}:${notifId}`, {
-          id: notifId, userEmail: offer.senderEmail,
-          type: 'trip_cancelled', iconName: 'XCircle', iconBg: 'bg-red-500/10 text-red-500',
-          title: 'Поездка отменена',
-          description: `Водитель отменил поездку ${existing.from} → ${existing.to}`,
-          isUnread: true, createdAt: new Date().toISOString(),
-        });
-      }
-    }
+    await cancelAllTripOffers(id, existing);
 
     // ✅ FIX #1: Удаляем вторичный индекс водителя при soft-delete
     if (existing.driverEmail) {
@@ -1673,6 +1854,7 @@ app.delete("/make-server-4e36197a/cargos/:id", async (c) => {
     }
 
     await kv.set(`ovora:cargo:${id}`, { ...existing, deletedAt: new Date().toISOString(), status: 'cancelled' });
+    await cancelCargoOffers(id, existing);
     if (existing.senderEmail) {
       await kv.del(`ovora:sendercargos:${existing.senderEmail}:${id}`).catch(() => {});
     }
@@ -1726,12 +1908,12 @@ app.post("/make-server-4e36197a/offers",
     const now = new Date().toISOString();
 
     // LOG-8: Server-side price validation — reject if client-sent price doesn't match trip rates
-    // Frontend sends `price` (not `totalPrice`); children count as half-price seats
+    // Same formula as TripDetail.tsx / ProposalFormModal.tsx: child seat = Math.round(pricePerSeat / 2)
     if (body.price != null && body.price > 0) {
       const trip: any = await kv.get(`ovora:trip:${tripId}`);
       if (trip) {
         const expectedSeats = (body.requestedSeats || 0) * (trip.pricePerSeat || 0);
-        const expectedChildren = (body.requestedChildren || 0) * (trip.pricePerSeat || 0) * 0.5;
+        const expectedChildren = (body.requestedChildren || 0) * Math.round((trip.pricePerSeat || 0) / 2);
         const expectedCargo = (body.requestedCargo || 0) * (trip.pricePerKg || 0);
         const expectedTotal = expectedSeats + expectedChildren + expectedCargo;
         if (expectedTotal > 0 && Math.abs(body.price - expectedTotal) > 1) {
@@ -2045,9 +2227,15 @@ app.put("/make-server-4e36197a/offers/:tripId/:offerId", async (c) => {
       if (capResult === 'not_found') {
         return c.json({ error: "Trip not found" }, 404);
       }
+      try {
+        await kv.set(key, updated);
+      } catch (writeErr) {
+        await restoreTripCapacity(tripId, existing, `PUT /offers accept write failed/${offerId}`);
+        throw writeErr;
+      }
+    } else {
+      await kv.set(key, updated);
     }
-
-    await kv.set(key, updated);
 
     const isFinalStatus = ['cancelled', 'declined', 'deleted', 'rejected'].includes(updated.status);
 
@@ -2340,64 +2528,25 @@ app.put("/make-server-4e36197a/cargo-offers/:cargoId/:offerId", async (c) => {
     // ── W2: Cargo single-accept lock (point G) ────────────────────────────
     let cargoLocked = false;
     if (updated.status === 'accepted' && existing.status !== 'accepted') {
-      const cargo: any = await kv.get(`ovora:cargo:${cargoId}`);
-      if (!cargo) return c.json({ error: 'Груз не найден' }, 404);
-      if (cargo.status !== 'active') {
+      const lock = await transitionCargoStatus(cargoId, 'active', 'matched', 3);
+      if (lock === 'not_found') return c.json({ error: 'Груз не найден' }, 404);
+      if (lock !== 'ok') {
         return c.json({ error: 'На этот груз уже принят другой оффер' }, 409);
       }
-      for (let attempt = 0; attempt < 3; attempt++) {
-        const locked = await setIfUnchanged(
-          `ovora:cargo:${cargoId}`,
-          cargo.updatedAt || null,
-          { ...cargo, status: 'matched', updatedAt: new Date().toISOString() }
-        );
-        if (locked) { cargoLocked = true; break; }
-        const fresh: any = await kv.get(`ovora:cargo:${cargoId}`);
-        if (!fresh || fresh.status !== 'active') {
-          return c.json({ error: 'На этот груз уже принят другой оффер' }, 409);
-        }
-      }
-      if (!cargoLocked) {
-        return c.json({ error: 'На этот груз уже принят другой оффер' }, 409);
-      }
+      cargoLocked = true;
     }
 
     // Record the offer — with compensation if cargo was locked
     try {
       await kv.set(key, updated);
     } catch (offerErr) {
-      if (cargoLocked) {
-        const cargo: any = await kv.get(`ovora:cargo:${cargoId}`);
-        if (cargo && cargo.status === 'matched') {
-          for (let attempt = 0; attempt < 3; attempt++) {
-            const reverted = await setIfUnchanged(
-              `ovora:cargo:${cargoId}`,
-              cargo.updatedAt || null,
-              { ...cargo, status: 'active', updatedAt: new Date().toISOString() }
-            );
-            if (reverted) break;
-          }
-        }
-      }
+      if (cargoLocked) await releaseCargo(cargoId, `cargo-offer write failed/${offerId}`);
       throw offerErr;
     }
 
     // ── W2: Reverse path matched → active when offer is cancelled/rejected ──
     if (['cancelled','declined','deleted','rejected'].includes(updated.status) && existing.status === 'accepted') {
-      const cargo: any = await kv.get(`ovora:cargo:${cargoId}`);
-      if (cargo && cargo.status === 'matched') {
-        for (let attempt = 0; attempt < 5; attempt++) {
-          const reverted = await setIfUnchanged(
-            `ovora:cargo:${cargoId}`,
-            cargo.updatedAt || null,
-            { ...cargo, status: 'active', updatedAt: new Date().toISOString() }
-          );
-          if (reverted) break;
-          if (attempt === 4) {
-            console.error(`[CAPACITY RESTORE FAILED] cargo matched→active: cargoId=${cargoId}, offerId=${offerId}`);
-          }
-        }
-      }
+      await releaseCargo(cargoId, `cargo-offer ${updated.status}/${offerId}`);
     }
 
     if (['cancelled','declined','deleted','rejected'].includes(updated.status)) {
@@ -2524,46 +2673,12 @@ app.post("/make-server-4e36197a/reviews",
       await kv.set(`ovora:userreviews:author:${review.authorEmail}:${reviewId}`, { reviewId }).catch(() => {});
     }
 
-    // ✅ Обновляем снепшот driverRating на всех поездках водителя — иначе
-    // рейтинг, показанный в карточке поездки, замораживается на момент её
-    // создания и никогда не обновляется новыми отзывами.
+    // Снепшот рейтинга на карточках поездок водителя — иначе он замораживается
+    // на момент создания поездки.
     if (review.targetEmail) {
-      try {
-        const targetIndex: any[] = await kv.getByPrefix(`ovora:userreviews:target:${review.targetEmail}:`);
-        const reviewIds = [...new Set(targetIndex.filter(e => e?.reviewId).map((e: any) => e.reviewId))];
-        const targetReviews: any[] = reviewIds.length > 0
-          ? await kv.mget(reviewIds.map(id => `ovora:review:${id}`))
-          : [];
-        const validReviews = targetReviews.filter(r => r != null);
-        if (validReviews.length > 0) {
-          const avgRating = calculateAverageRating(validReviews.map(r => r.rating));
-          // ✅ FIX: читаем индекс ovora:drivertrips:* вместо full-scan по ВСЕМ
-          // поездкам всех водителей (см. /trips/my чуть выше — тот же паттерн).
-          const driverTripsIndex: any[] = await kv.getByPrefix(`ovora:drivertrips:${review.targetEmail}:`);
-          let driverTrips: any[];
-          if (driverTripsIndex.length > 0) {
-            const tripIds = driverTripsIndex.map((e: any) => e.tripId).filter(Boolean);
-            const fetchedTrips: any[] = tripIds.length > 0
-              ? await kv.mget(tripIds.map((id: string) => `ovora:trip:${id}`))
-              : [];
-            driverTrips = fetchedTrips.filter(t => t && !t.deletedAt);
-          } else {
-            // Индекс ещё не построен (legacy) — fallback на full-scan
-            const allTrips: any[] = await kv.getByPrefix(`ovora:trip:`);
-            driverTrips = allTrips.filter(t => t && !t.deletedAt && t.driverEmail === review.targetEmail);
-          }
-          for (const trip of driverTrips) {
-            await kv.set(`ovora:trip:${trip.id}`, { ...trip, driverRating: avgRating });
-          }
-          const targetUserKey = `ovora:user:email:${String(review.targetEmail).toLowerCase().trim()}`;
-          const targetUser: any = await kv.get(targetUserKey);
-          if (targetUser) {
-            await kv.set(targetUserKey, { ...targetUser, rating: avgRating });
-          }
-        }
-      } catch (e) {
-        console.log("[POST /reviews] Failed to refresh driverRating snapshot:", e);
-      }
+      await recalculateRating(kv, review.targetEmail).catch((e: any) =>
+        console.log("[POST /reviews] Failed to refresh driverRating snapshot:", e)
+      );
     }
 
     await CargoAuditLog.record({ action: 'review.create', actorEmail: authorEmail, targetId: reviewId, targetType: 'review', details: { targetEmail, tripId } });
@@ -3028,7 +3143,12 @@ app.put("/make-server-4e36197a/chat/:chatId/proposal/:proposalId", async (c) => 
 
             // 1. Mark offer as accepted
             const offerKey = `ovora:offer:${matchingOffer.tripId}:${matchingOffer.offerId}`;
-            await kv.set(offerKey, { ...matchingOffer, status: 'accepted', acceptedAt: new Date().toISOString() });
+            try {
+              await kv.set(offerKey, { ...matchingOffer, status: 'accepted', acceptedAt: new Date().toISOString() });
+            } catch (writeErr) {
+              await restoreTripCapacity(tripId, matchingOffer, `chat accept write failed/${matchingOffer.offerId}`);
+              throw writeErr;
+            }
 
             // ✅ Создать уведомление отправителю о принятии оферты
             try {
@@ -3101,12 +3221,13 @@ app.put("/make-server-4e36197a/chat/:chatId/proposal/:proposalId", async (c) => 
             senderEmail && o.senderEmail === senderEmail
           );
 
-          // Pass 2: fallback — tripId only (pending or accepted)
+          // Pass 2: fallback — tripId only, pending only. An accepted offer is someone's
+          // confirmed booking: never touch it without an exact sender match.
           if (!matchingOffer) {
             matchingOffer = allOffers.find((o: any) =>
               o &&
               String(o.tripId) === String(tripId) &&
-              (o.status === 'pending' || o.status === 'accepted')
+              o.status === 'pending'
             );
             if (matchingOffer) {
               console.log(`[reject] Found offer via fallback (tripId only), senderEmail=${matchingOffer.senderEmail}`);
@@ -5263,6 +5384,7 @@ app.delete("/make-server-4e36197a/admin/cargos/:id", async (c) => {
     const existing: any = await kv.get(`ovora:cargo:${id}`);
     if (!existing) return c.json({ error: "Cargo not found" }, 404);
     await kv.set(`ovora:cargo:${id}`, { ...existing, deletedAt: new Date().toISOString(), status: 'cancelled' });
+    await cancelCargoOffers(id, existing);
     if (existing.senderEmail) {
       await kv.del(`ovora:sendercargos:${existing.senderEmail}:${id}`).catch(() => {});
       const sender: any = await kv.get(`ovora:user:email:${existing.senderEmail.toLowerCase().trim()}`);
@@ -5599,8 +5721,8 @@ app.put("/make-server-4e36197a/admin/users/:email/status", async (c) => {
     await kv.set(key, updated);
     // ROOT-6: revoke user JWT tokens when blocking — forces existing tokens to be rejected
     if (status === "blocked" && status !== existing.status) {
-      await kv.set(`ovora:user:token_revoked:${email.toLowerCase().trim()}`, { ts: Date.now() });
-      console.log(`[Auth] Token revoked for ${email} (admin block)`);
+      await revokeUserTokens(email);
+      console.log(`[Auth] Tokens revoked for ${email} (admin block)`);
     }
     if ((status === "blocked" || status === "active") && status !== existing.status) {
       if (!(await throttleEmail(email, `user-status-${status}`, 3_600_000))) {
@@ -5629,6 +5751,14 @@ app.delete("/make-server-4e36197a/admin/users/:email", async (c) => {
     if (!existing) return c.json({ error: "User not found" }, 404);
 
     const cleanPhone = String(existing.phone || "").replace(/\D/g, "");
+    const normalizedEmail = email.toLowerCase().trim();
+
+    // Порядок важен: отзыв токенов → каскад → удаление записи. Если каскад упадёт,
+    // запись ещё существует и админ может повторить — каскад идемпотентен.
+    await revokeUserTokens(normalizedEmail);
+    const cascade = await cascadeDeletedUser(normalizedEmail);
+    console.log(`[DELETE /admin/users] cascade for ${normalizedEmail}: ${JSON.stringify(cascade)}`);
+
     await kv.del(key);
     if (cleanPhone.length >= 7) {
       await kv.del(`ovora:user:phone:${cleanPhone}`);
@@ -5640,93 +5770,6 @@ app.delete("/make-server-4e36197a/admin/users/:email", async (c) => {
         originalRole: existing.role,
         originalName: `${existing.firstName || ""} ${existing.lastName || ""}`.trim(),
       });
-    }
-
-    // ROOT-12: Cleanup push subscriptions and documents for deleted user
-    const pushSubs: any[] = await kv.getByPrefix(`ovora:push:sub:${email.toLowerCase().trim()}:`);
-    for (const sub of pushSubs) {
-      if (sub?.endpoint) {
-        const subId = btoa(sub.endpoint).replace(/[^a-zA-Z0-9]/g, '').substring(0, 40);
-        await kv.del(`ovora:push:sub:${email.toLowerCase().trim()}:${subId}`).catch(() => {});
-      }
-    }
-    const docs: any[] = await kv.getByPrefix(`ovora:document:${email.toLowerCase().trim()}:`);
-    for (const doc of docs) {
-      if (doc?.id) await kv.del(`ovora:document:${email.toLowerCase().trim()}:${doc.id}`).catch(() => {});
-    }
-    if (pushSubs.length || docs.length) {
-      console.log(`[DELETE /admin/users] Cleaned up ${pushSubs.length} push subs, ${docs.length} documents for ${email}`);
-    }
-
-    // ── ROOT-2: Cascade cleanup ──────────────────────────────────────────
-    const now = new Date().toISOString();
-    let cancelledTrips = 0, cancelledOffers = 0, cancelledCargoOffers = 0, deletedNotifs = 0;
-
-    // 1. Cancel all active trips of this driver + cascade offers
-    const driverTripsIdx: any[] = await kv.getByPrefix(`ovora:drivertrips:${email}:`);
-    for (const entry of driverTripsIdx) {
-      if (!entry?.tripId) continue;
-      const trip: any = await kv.get(`ovora:trip:${entry.tripId}`);
-      if (trip && !trip.deletedAt && trip.status !== 'cancelled') {
-        await kv.set(`ovora:trip:${entry.tripId}`, { ...trip, status: 'cancelled', deletedAt: now });
-        cancelledTrips++;
-
-        // Cascade: cancel all offers on this trip, restore capacity for accepted
-        const tripOffers: any[] = await kv.getByPrefix(`ovora:offer:${entry.tripId}:`);
-        for (const offer of tripOffers) {
-          if (!offer || ['cancelled','declined','deleted','rejected'].includes(offer.status)) continue;
-
-          if (offer.status === 'accepted') {
-            await restoreTripCapacity(entry.tripId, offer, `user-delete/${offer.offerId}`);
-          }
-
-          await kv.set(`ovora:offer:${entry.tripId}:${offer.offerId}`, { ...offer, status: 'cancelled', cancelledAt: now });
-          cancelledOffers++;
-
-          // Clean offer indexes
-          if (offer.driverEmail) await kv.del(`ovora:driveroffers:${offer.driverEmail}:${offer.offerId}`).catch(() => {});
-          if (offer.senderEmail) await kv.del(`ovora:senderoffers:${offer.senderEmail}:${offer.offerId}`).catch(() => {});
-
-          // Notify sender about trip cancellation
-          if (offer.senderEmail) {
-            const notifId = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-            await kv.set(`ovora:notification:${offer.senderEmail}:${notifId}`, {
-              id: notifId, userEmail: offer.senderEmail,
-              type: 'trip_cancelled', iconName: 'XCircle', iconBg: 'bg-red-500/10 text-red-500',
-              title: 'Поездка отменена',
-              description: `Поездка ${trip.from || ''} → ${trip.to || ''} отменена (водитель удалён)`,
-              isUnread: true, createdAt: now,
-            });
-          }
-        }
-      }
-      // Clean driver-trip index regardless of trip status
-      await kv.del(`ovora:drivertrips:${email}:${entry.tripId}`).catch(() => {});
-    }
-
-    // 2. Cancel pending cargo-offers from this driver
-    const driverCargoIdx: any[] = await kv.getByPrefix(`ovora:drivercargooffers:${email}:`);
-    for (const entry of driverCargoIdx) {
-      if (!entry?.cargoId || !entry?.offerId) continue;
-      const co: any = await kv.get(`ovora:cargo-offer:${entry.cargoId}:${entry.offerId}`);
-      if (co && co.status === 'pending') {
-        await kv.set(`ovora:cargo-offer:${entry.cargoId}:${entry.offerId}`, { ...co, status: 'cancelled', cancelledAt: now });
-        cancelledCargoOffers++;
-      }
-      await kv.del(`ovora:drivercargooffers:${email}:${entry.offerId}`).catch(() => {});
-    }
-
-    // 3. Delete all notifications for this user
-    const notifs: any[] = await kv.getByPrefix(`ovora:notification:${email}:`);
-    for (const n of notifs) {
-      if (n?.id) {
-        await kv.del(`ovora:notification:${email}:${n.id}`).catch(() => {});
-        deletedNotifs++;
-      }
-    }
-
-    if (cancelledTrips || cancelledOffers || cancelledCargoOffers || deletedNotifs) {
-      console.log(`[DELETE /admin/users] ROOT-2 cascade for ${email}: ${cancelledTrips} trips, ${cancelledOffers} offers, ${cancelledCargoOffers} cargo-offers, ${deletedNotifs} notifications`);
     }
 
     await CargoAuditLog.record({ action: 'user.admin_delete', actorEmail: adminActor(c), targetId: email, targetType: 'user', details: { role: existing.role, blacklisted: cleanPhone.length >= 7 } });

@@ -125,15 +125,24 @@ export async function throttleEmail(
       console.log(`[Email] Throttled: ${eventType} → ${userEmail}`);
       return true; // пропускаем
     }
-    // ROOT-7: Self-cleaning expired keys + store expiry timestamp for periodic cleanup
-    if (last?.ts && Date.now() - last.ts >= ttlMs) {
-      await kv.del(key).catch(() => {}); // clean expired key
-    }
     await kv.set(key, { ts: Date.now(), expiresAt: Date.now() + ttlMs });
     return false;
   } catch {
     return false; // при ошибке не блокируем отправку
   }
+}
+
+// Самый длинный ttl среди вызовов throttleEmail — сутки. Старые ключи без expiresAt
+// считаем истёкшими через этот срок.
+const THROTTLE_LEGACY_MAX_TTL_MS = 86_400_000;
+
+export async function purgeExpiredThrottleKeys(): Promise<number> {
+  const now = Date.now();
+  return kv.deleteByPrefixWhere('ovora:email:throttle:', (v: any) => {
+    if (typeof v?.expiresAt === 'number') return v.expiresAt < now;
+    if (typeof v?.ts === 'number') return now - v.ts > THROTTLE_LEGACY_MAX_TTL_MS;
+    return true;
+  });
 }
 
 // ══════════════════════════════════════════════════════════════════════════════

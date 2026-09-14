@@ -33,7 +33,16 @@ export async function recalculateRating(kv: any, targetEmail: string): Promise<v
     const allTrips: any[] = await kv.getByPrefix(`ovora:trip:`);
     trips = allTrips.filter((t: any) => t && !t.deletedAt && t.driverEmail === targetEmail);
   }
+  // Условная запись: обычный set затёр бы параллельное списание мест на поездке.
   for (const trip of trips) {
-    await kv.set(`ovora:trip:${trip.id}`, { ...trip, driverRating: avgRating });
+    let current = trip;
+    for (let attempt = 0; attempt < 3 && current; attempt++) {
+      if (current.driverRating === avgRating) break;
+      const written = await kv.setIfUnchanged(`ovora:trip:${current.id}`, current.updatedAt || null, {
+        ...current, driverRating: avgRating, updatedAt: new Date().toISOString(),
+      });
+      if (written) break;
+      current = await kv.get(`ovora:trip:${current.id}`);
+    }
   }
 }
