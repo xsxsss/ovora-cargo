@@ -14,6 +14,7 @@
 // проверки) — иначе продакшен сломался бы для всех пользователей до того, как
 // секрет будет добавлен и фронт начнёт присылать токен.
 import { SignJWT, jwtVerify } from "npm:jose";
+import * as kv from "./kv_store.tsx";
 
 const TOKEN_TTL = '30d';
 
@@ -55,7 +56,16 @@ export async function verifiedEmailFromToken(c: any): Promise<string | null> {
 
   try {
     const { payload } = await jwtVerify(token, secret);
-    return typeof payload.email === 'string' ? payload.email : null;
+    const email = typeof payload.email === 'string' ? payload.email : null;
+    if (!email) return null;
+
+    // ROOT-6: check per-user token revocation (logout / admin block)
+    const revoked: any = await kv.get(`ovora:user:token_revoked:${email}`);
+    if (revoked?.ts && (payload.iat ?? 0) * 1000 < revoked.ts) {
+      return null; // token was issued before revocation
+    }
+
+    return email;
   } catch (err) {
     console.warn('[User Auth] Invalid/expired user JWT:', err);
     return null;

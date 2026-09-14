@@ -993,6 +993,23 @@ app.get("/make-server-4e36197a/auth/user/:email", async (c) => {
   }
 });
 
+// ── ROOT-6: User logout — revoke per-user JWT token ────────────────────────
+// POST /auth/logout — requires X-User-Token header (getCallerEmail extracts email).
+// Writes ovora:user:token_revoked:{email} = { ts: Date.now() } so that all tokens
+// issued before this timestamp are rejected by verifiedEmailFromToken().
+app.post("/make-server-4e36197a/auth/logout", async (c) => {
+  try {
+    const email = getCallerEmail(c);
+    if (!email) return c.json({ error: "Authentication required" }, 401);
+    await kv.set(`ovora:user:token_revoked:${email}`, { ts: Date.now() });
+    console.log(`[Auth] Token revoked for ${email} (logout)`);
+    return c.json({ success: true });
+  } catch (err) {
+    console.log("Error POST /auth/logout:", err);
+    return c.json({ error: 'Внутренняя ошибка сервера' }, 500);
+  }
+});
+
 // ══════════════════════════════════════════════════════════════════════════════
 //  TRIPS ROUTES
 //  KV: ovora:trip:{id} → trip object
@@ -1111,17 +1128,8 @@ function maybeTriggerTripPurge(): void {
       if (purged > 0) console.log(`[purge] Автоудаление: очищено ${purged} поездок старше 30 дней`);
 
       // ROOT-7: Cleanup expired email throttle keys (runs with same cadence as trip purge)
-      const throttleKeys: any[] = await kv.getByPrefix('ovora:email:throttle:');
-      let cleaned = 0;
-      for (const entry of throttleKeys) {
-        if (entry?.expiresAt && Date.now() > entry.expiresAt) {
-          // Key is expired — need to reconstruct the key from the value to delete it
-          // Since we can't get the key from getByPrefix value, we skip per-key deletion
-          // and rely on the self-cleaning in throttleEmail() for actively-used keys
-          cleaned++;
-        }
-      }
-      if (cleaned > 0) console.log(`[purge] Found ${cleaned} expired throttle keys (cleaned on next access)`);
+      const cleaned = await kv.deleteExpiredByPrefix('ovora:email:throttle:');
+      if (cleaned > 0) console.log(`[purge] Cleaned ${cleaned} expired throttle keys`);
     } catch (err) {
       console.log('[purge] Ошибка проверки автоудаления:', err);
     } finally {
@@ -5589,6 +5597,11 @@ app.put("/make-server-4e36197a/admin/users/:email/status", async (c) => {
     if (!existing) return c.json({ error: "User not found" }, 404);
     const updated = { ...existing, status, updatedAt: new Date().toISOString() };
     await kv.set(key, updated);
+    // ROOT-6: revoke user JWT tokens when blocking — forces existing tokens to be rejected
+    if (status === "blocked" && status !== existing.status) {
+      await kv.set(`ovora:user:token_revoked:${email.toLowerCase().trim()}`, { ts: Date.now() });
+      console.log(`[Auth] Token revoked for ${email} (admin block)`);
+    }
     if ((status === "blocked" || status === "active") && status !== existing.status) {
       if (!(await throttleEmail(email, `user-status-${status}`, 3_600_000))) {
         const tpl = userStatusTemplate({
@@ -5643,6 +5656,77 @@ app.delete("/make-server-4e36197a/admin/users/:email", async (c) => {
     }
     if (pushSubs.length || docs.length) {
       console.log(`[DELETE /admin/users] Cleaned up ${pushSubs.length} push subs, ${docs.length} documents for ${email}`);
+    }
+
+    // ── ROOT-2: Cascade cleanup ──────────────────────────────────────────
+    const now = new Date().toISOString();
+    let cancelledTrips = 0, cancelledOffers = 0, cancelledCargoOffers = 0, deletedNotifs = 0;
+
+    // 1. Cancel all active trips of this driver + cascade offers
+    const driverTripsIdx: any[] = await kv.getByPrefix(`ovora:drivertrips:${email}:`);
+    for (const entry of driverTripsIdx) {
+      if (!entry?.tripId) continue;
+      const trip: any = await kv.get(`ovora:trip:${entry.tripId}`);
+      if (trip && !trip.deletedAt && trip.status !== 'cancelled') {
+        await kv.set(`ovora:trip:${entry.tripId}`, { ...trip, status: 'cancelled', deletedAt: now });
+        cancelledTrips++;
+
+        // Cascade: cancel all offers on this trip, restore capacity for accepted
+        const tripOffers: any[] = await kv.getByPrefix(`ovora:offer:${entry.tripId}:`);
+        for (const offer of tripOffers) {
+          if (!offer || ['cancelled','declined','deleted','rejected'].includes(offer.status)) continue;
+
+          if (offer.status === 'accepted') {
+            await restoreTripCapacity(entry.tripId, offer, `user-delete/${offer.offerId}`);
+          }
+
+          await kv.set(`ovora:offer:${entry.tripId}:${offer.offerId}`, { ...offer, status: 'cancelled', cancelledAt: now });
+          cancelledOffers++;
+
+          // Clean offer indexes
+          if (offer.driverEmail) await kv.del(`ovora:driveroffers:${offer.driverEmail}:${offer.offerId}`).catch(() => {});
+          if (offer.senderEmail) await kv.del(`ovora:senderoffers:${offer.senderEmail}:${offer.offerId}`).catch(() => {});
+
+          // Notify sender about trip cancellation
+          if (offer.senderEmail) {
+            const notifId = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+            await kv.set(`ovora:notification:${offer.senderEmail}:${notifId}`, {
+              id: notifId, userEmail: offer.senderEmail,
+              type: 'trip_cancelled', iconName: 'XCircle', iconBg: 'bg-red-500/10 text-red-500',
+              title: 'Поездка отменена',
+              description: `Поездка ${trip.from || ''} → ${trip.to || ''} отменена (водитель удалён)`,
+              isUnread: true, createdAt: now,
+            });
+          }
+        }
+      }
+      // Clean driver-trip index regardless of trip status
+      await kv.del(`ovora:drivertrips:${email}:${entry.tripId}`).catch(() => {});
+    }
+
+    // 2. Cancel pending cargo-offers from this driver
+    const driverCargoIdx: any[] = await kv.getByPrefix(`ovora:drivercargooffers:${email}:`);
+    for (const entry of driverCargoIdx) {
+      if (!entry?.cargoId || !entry?.offerId) continue;
+      const co: any = await kv.get(`ovora:cargo-offer:${entry.cargoId}:${entry.offerId}`);
+      if (co && co.status === 'pending') {
+        await kv.set(`ovora:cargo-offer:${entry.cargoId}:${entry.offerId}`, { ...co, status: 'cancelled', cancelledAt: now });
+        cancelledCargoOffers++;
+      }
+      await kv.del(`ovora:drivercargooffers:${email}:${entry.offerId}`).catch(() => {});
+    }
+
+    // 3. Delete all notifications for this user
+    const notifs: any[] = await kv.getByPrefix(`ovora:notification:${email}:`);
+    for (const n of notifs) {
+      if (n?.id) {
+        await kv.del(`ovora:notification:${email}:${n.id}`).catch(() => {});
+        deletedNotifs++;
+      }
+    }
+
+    if (cancelledTrips || cancelledOffers || cancelledCargoOffers || deletedNotifs) {
+      console.log(`[DELETE /admin/users] ROOT-2 cascade for ${email}: ${cancelledTrips} trips, ${cancelledOffers} offers, ${cancelledCargoOffers} cargo-offers, ${deletedNotifs} notifications`);
     }
 
     await CargoAuditLog.record({ action: 'user.admin_delete', actorEmail: adminActor(c), targetId: email, targetType: 'user', details: { role: existing.role, blacklisted: cleanPhone.length >= 7 } });
