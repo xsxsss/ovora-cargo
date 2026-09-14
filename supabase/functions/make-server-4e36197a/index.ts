@@ -1460,6 +1460,33 @@ app.delete("/make-server-4e36197a/trips/:id", async (c) => {
 
     await kv.set(`ovora:trip:${id}`, { ...existing, deletedAt: new Date().toISOString(), status: 'cancelled' });
 
+    // ── W2: Cascade cancel all offers on this trip ────────────────────────
+    const tripOffers: any[] = await kv.getByPrefix(`ovora:offer:${id}:`);
+    for (const offer of tripOffers) {
+      if (!offer || ['cancelled','declined','deleted','rejected'].includes(offer.status)) continue;
+
+      if (offer.status === 'accepted') {
+        await restoreTripCapacity(id, offer, `trip-cancel/${offer.offerId}`);
+      }
+
+      const updatedOffer = { ...offer, status: 'cancelled', cancelledAt: new Date().toISOString() };
+      await kv.set(`ovora:offer:${id}:${offer.offerId}`, updatedOffer);
+
+      if (offer.driverEmail) await kv.del(`ovora:driveroffers:${offer.driverEmail}:${offer.offerId}`).catch(() => {});
+      if (offer.senderEmail) await kv.del(`ovora:senderoffers:${offer.senderEmail}:${offer.offerId}`).catch(() => {});
+
+      if (offer.senderEmail) {
+        const notifId = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        await kv.set(`ovora:notification:${offer.senderEmail}:${notifId}`, {
+          id: notifId, userEmail: offer.senderEmail,
+          type: 'trip_cancelled', iconName: 'XCircle', iconBg: 'bg-red-500/10 text-red-500',
+          title: 'Поездка отменена',
+          description: `Водитель отменил поездку ${existing.from} → ${existing.to}`,
+          isUnread: true, createdAt: new Date().toISOString(),
+        });
+      }
+    }
+
     // ✅ FIX #1: Удаляем вторичный индекс водителя при soft-delete
     if (existing.driverEmail) {
       await kv.del(`ovora:drivertrips:${existing.driverEmail}:${id}`).catch(() => {});
