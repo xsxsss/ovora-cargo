@@ -56,7 +56,7 @@ export function initYandexMetrika(router: RouterLike): void {
     w.ym = queue;
     const script = document.createElement('script');
     script.async = true;
-    script.src = TAG_URL;
+    script.src = `${TAG_URL}?id=${id}`;
     document.head.appendChild(script);
   }
 
