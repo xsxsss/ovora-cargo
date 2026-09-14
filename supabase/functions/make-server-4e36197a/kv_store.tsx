@@ -86,3 +86,21 @@ export const getByPrefix = async (prefix: string): Promise<any[]> => {
   }
   return data?.map((d) => d.value) ?? [];
 };
+
+// Conditional write: updates value only if the current updatedAt matches expectedUpdatedAt.
+// Returns true if the row was updated (lock acquired), false if someone else wrote first.
+// Only works on EXISTING keys — use set() to create new records.
+export const setIfUnchanged = async (
+  key: string,
+  expectedUpdatedAt: string | null,
+  value: any,
+): Promise<boolean> => {
+  const supabase = client();
+  let q = supabase.from("kv_store_4e36197a").update({ value }).eq("key", key);
+  q = expectedUpdatedAt === null
+    ? q.is("value->>updatedAt", null)
+    : q.eq("value->>updatedAt", expectedUpdatedAt);
+  const { data, error } = await q.select("key");
+  if (error) throw new Error(error.message);
+  return (data?.length ?? 0) > 0;
+};

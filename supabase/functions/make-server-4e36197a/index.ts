@@ -16,6 +16,7 @@ import {
 import { rateLimitMiddleware, RL } from "./rateLimit.tsx";
 import { calculateAverageRating } from "./rating.tsx";
 import * as kv from "./kv_store.tsx";
+import { setIfUnchanged } from "./kv_store.tsx";
 import { Blacklist } from "./blacklist.tsx";
 import { AuditLog as CargoAuditLog } from "./cargoAudit.tsx";
 import { AuditLog as AviaAuditLog } from "./aviaAudit.tsx";
@@ -44,6 +45,59 @@ function generateEmailHash(email: string): string {
 function generatePairChatId(emailA: string, emailB: string): string {
   const sorted = [emailA || 'guest', emailB || 'guest'].sort();
   return `pair_${generateEmailHash(sorted[0])}_${generateEmailHash(sorted[1])}`;
+}
+
+// ── Trip capacity accounting (W2) ───────────────────────────────────────────
+// Analog of adjustFlightCapacity from AVIA. Uses setIfUnchanged for atomic
+// conditional writes — prevents double-booking from concurrent accepts.
+async function adjustTripCapacity(
+  tripId: string,
+  offer: { requestedSeats?: number; requestedChildren?: number; requestedCargo?: number },
+  direction: -1 | 1,
+  maxRetries = 3,
+): Promise<'ok' | 'insufficient' | 'conflict' | 'not_found'> {
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    const trip: any = await kv.get(`ovora:trip:${tripId}`);
+    if (!trip) return 'not_found';
+
+    const seats    = offer.requestedSeats    || 0;
+    const children  = offer.requestedChildren || 0;
+    const cargo    = offer.requestedCargo    || 0;
+
+    if (direction === -1) {
+      if (seats    > (trip.availableSeats || 0) ||
+          children > (trip.childSeats    || 0) ||
+          cargo    > (trip.cargoCapacity || 0)) {
+        return 'insufficient';
+      }
+    }
+
+    const expectedUpdatedAt = trip.updatedAt || null;
+    const next = {
+      ...trip,
+      updatedAt: new Date().toISOString(),
+      availableSeats: Math.max(0, (trip.availableSeats || 0) + direction * seats),
+      childSeats:     Math.max(0, (trip.childSeats    || 0) + direction * children),
+      cargoCapacity:  Math.max(0, (trip.cargoCapacity || 0) + direction * cargo),
+    };
+
+    const written = await setIfUnchanged(`ovora:trip:${tripId}`, expectedUpdatedAt, next);
+    if (written) return 'ok';
+  }
+  return 'conflict';
+}
+
+// Retry wrapper for capacity restore — more retries (5) + logging on failure.
+// Used when rejecting/cancelling an already-accepted offer (points B, D, E, F).
+async function restoreTripCapacity(
+  tripId: string,
+  offer: { requestedSeats?: number; requestedChildren?: number; requestedCargo?: number },
+  context: string,
+): Promise<void> {
+  const result = await adjustTripCapacity(tripId, offer, 1, 5);
+  if (result !== 'ok') {
+    console.error(`[CAPACITY RESTORE FAILED] ${context}: tripId=${tripId}, result=${result}, offer=${JSON.stringify(offer)}`);
+  }
 }
 
 // ── Input sanitization helper ──────────────────────────────────────────────
