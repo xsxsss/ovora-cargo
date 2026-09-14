@@ -34,11 +34,13 @@ function SenderCargoCard({
   const navigate = useNavigate();
   const statusColors: Record<string, string> = {
     active:    'bg-emerald-500/15 text-emerald-400',
+    matched:   'bg-blue-500/15 text-blue-400',
     cancelled: 'bg-rose-500/15 text-rose-400',
     completed: 'bg-white/[0.07] text-[#64748b]',
   };
   const statusLabels: Record<string, string> = {
     active:    'Активно',
+    matched:   'Водитель найден',
     cancelled: 'Отменено',
     completed: 'Завершено',
   };

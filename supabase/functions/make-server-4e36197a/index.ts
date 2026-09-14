@@ -2272,7 +2272,73 @@ app.put("/make-server-4e36197a/cargo-offers/:cargoId/:offerId", async (c) => {
 
     const { callerEmail: _drop, ...safeBody } = body;
     const updated = { ...existing, ...safeBody, cargoId, offerId, updatedAt: new Date().toISOString() };
-    await kv.set(key, updated);
+
+    // ── W2: Cargo single-accept lock (point G) ────────────────────────────
+    // active → matched via setIfUnchanged BEFORE recording the offer.
+    // If another offer was already accepted, cargo.status !== 'active' → 409.
+    let cargoLocked = false;
+    if (updated.status === 'accepted' && existing.status !== 'accepted') {
+      const cargo: any = await kv.get(`ovora:cargo:${cargoId}`);
+      if (!cargo) return c.json({ error: 'Груз не найден' }, 404);
+      if (cargo.status !== 'active') {
+        return c.json({ error: 'На этот груз уже принят другой оффер' }, 409);
+      }
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const locked = await setIfUnchanged(
+          `ovora:cargo:${cargoId}`,
+          cargo.updatedAt || null,
+          { ...cargo, status: 'matched', updatedAt: new Date().toISOString() }
+        );
+        if (locked) { cargoLocked = true; break; }
+        // Re-read and retry
+        const fresh: any = await kv.get(`ovora:cargo:${cargoId}`);
+        if (!fresh || fresh.status !== 'active') {
+          return c.json({ error: 'На этот груз уже принят другой оффер' }, 409);
+        }
+      }
+      if (!cargoLocked) {
+        return c.json({ error: 'На этот груз уже принят другой оффер' }, 409);
+      }
+    }
+
+    // Record the offer — with compensation if cargo was locked
+    try {
+      await kv.set(key, updated);
+    } catch (offerErr) {
+      // Compensation: revert cargo to active if we just locked it
+      if (cargoLocked) {
+        const cargo: any = await kv.get(`ovora:cargo:${cargoId}`);
+        if (cargo && cargo.status === 'matched') {
+          for (let attempt = 0; attempt < 3; attempt++) {
+            const reverted = await setIfUnchanged(
+              `ovora:cargo:${cargoId}`,
+              cargo.updatedAt || null,
+              { ...cargo, status: 'active', updatedAt: new Date().toISOString() }
+            );
+            if (reverted) break;
+          }
+        }
+      }
+      throw offerErr;
+    }
+
+    // ── W2: Reverse path matched → active when offer is cancelled/rejected ──
+    if (['cancelled','declined','deleted','rejected'].includes(updated.status) && existing.status === 'accepted') {
+      const cargo: any = await kv.get(`ovora:cargo:${cargoId}`);
+      if (cargo && cargo.status === 'matched') {
+        for (let attempt = 0; attempt < 5; attempt++) {
+          const reverted = await setIfUnchanged(
+            `ovora:cargo:${cargoId}`,
+            cargo.updatedAt || null,
+            { ...cargo, status: 'active', updatedAt: new Date().toISOString() }
+          );
+          if (reverted) break;
+          if (attempt === 4) {
+            console.error(`[CAPACITY RESTORE FAILED] cargo matched→active: cargoId=${cargoId}, offerId=${offerId}`);
+          }
+        }
+      }
+    }
 
     if (['cancelled','declined','deleted','rejected'].includes(updated.status)) {
       if (existing.driverEmail) await kv.del(`ovora:drivercargooffers:${existing.driverEmail}:${offerId}`).catch(() => {});
