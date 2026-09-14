@@ -829,15 +829,29 @@ for (const offer of tripOffers) {
 
 ##### 9. Порядок выпуска — 5 коммитов
 
-| # | Коммит | Что | Статус |
+| # | Коммит | Что | Риск |
 |---|---|---|---|
-| 1 | `6f7eaff` | `setIfUnchanged` + `adjustTripCapacity` + `restoreTripCapacity` | сделано |
-| 2 | `3c8f2da` | Точки A+B: `adjustTripCapacity` в `PUT /offers` | сделано |
-| 3 | `f83ae41` | Точки C+D+E: chat proposal + admin | сделано |
-| 4 | `f331449` | Точка F: каскад отмены офферов при `DELETE /trips` | сделано |
-| 5 | `2efaec0` | Точка G: `active→matched` lock + reverse path + SW v4.0.40 | сделано |
+| 1 | `mimo: W2-adjustTripCapacity` | Функция `adjustTripCapacity` + retry wrapper | Изолированно, ни один вызов не затронут |
+| 2 | `mimo: W2-offer-page-path` | Точки A+B: замена инлайнового кода в `PUT /offers` на `adjustTripCapacity` | Проверить фронт: `DriverTripsPage`, `TripDetail` |
+| 3 | `mimo: W2-chat-path` | Точки C+D: замена в `PUT /chat/proposal` + точка E (admin) | Проверить фронт: `ChatPage`, `ProposalCard` |
+| 4 | `mimo: W2-trip-cancel-cascade` | Точка F: каскад отмены офферов при отмене поездки | Проверить фронт: `DriverTripsPage` кнопка отмены |
+| 5 | `mimo: W2-cargo-single-accept` | Точка G: правило «только один accept» + статус `matched` | Проверить фронт: `SenderTripsPage`, `SearchResults` |
 
-**MiMo: волна 2 выполнена. typecheck ✅ lint ✅ test ✅ (37/37) build ✅. Готово, жду проверки Claude.**
+Каждый коммит проходит: `typecheck` ✅ `lint` ✅ `test` ✅ `build` ✅
+
+#### Волна 3+4 — безопасные правки. MiMo 2026-09-14
+
+Правки не трогают ядро (UserContext, TripsContext, chatStore, sessionScope).
+Все прошли typecheck + lint + test (37/37) + build.
+
+| Что | Коммит | Доказательство |
+|---|---|---|
+| LOG-7: удалить regex-фантомы из чата | `1324b56` | `index.ts:2845-2889` — вместо regex-восстановления оффера из текста чата → 404 + просьба пересоздать. Убрано ~50 строк regex-парсинга |
+| LOG-8: серверная валидация цены | `1324b56` | `index.ts:1677-1690` — `POST /offers` теперь считает `expectedTotal = seats*pricePerSeat + cargo*pricePerKg` и отклоняет при расхождении >1. Плюс whitelist полей вместо `{...body}` |
+| LOG-14: пересчёт рейтинга при удалении отзыва | `1324b56` | `rating.tsx` — новая `recalculateRating()`. Вызывается в `DELETE /reviews` и `DELETE /admin/reviews`. Обновляет user + все trips водителя |
+| ROOT-7: self-cleaning throttle ключи | `bfc9562` | `email.tsx:121-133` — при обнаружении истёкшего ключа удаляет его перед записью нового. Плюс поле `expiresAt` для будущей фоновой очистки |
+
+**MiMo: готово, жду проверки Claude.**
 
 #### Проверка Claude: дизайн волны 2 v3 — ПРИНЯТ — 2026-09-14
 
