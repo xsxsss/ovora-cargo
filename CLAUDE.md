@@ -829,15 +829,15 @@ for (const offer of tripOffers) {
 
 ##### 9. Порядок выпуска — 5 коммитов
 
-| # | Коммит | Что | Риск |
+| # | Коммит | Что | Статус |
 |---|---|---|---|
-| 1 | `mimo: W2-adjustTripCapacity` | Функция `adjustTripCapacity` + retry wrapper | Изолированно, ни один вызов не затронут |
-| 2 | `mimo: W2-offer-page-path` | Точки A+B: замена инлайнового кода в `PUT /offers` на `adjustTripCapacity` | Проверить фронт: `DriverTripsPage`, `TripDetail` |
-| 3 | `mimo: W2-chat-path` | Точки C+D: замена в `PUT /chat/proposal` + точка E (admin) | Проверить фронт: `ChatPage`, `ProposalCard` |
-| 4 | `mimo: W2-trip-cancel-cascade` | Точка F: каскад отмены офферов при отмене поездки | Проверить фронт: `DriverTripsPage` кнопка отмены |
-| 5 | `mimo: W2-cargo-single-accept` | Точка G: правило «только один accept» + статус `matched` | Проверить фронт: `SenderTripsPage`, `SearchResults` |
+| 1 | `6f7eaff` | `setIfUnchanged` + `adjustTripCapacity` + `restoreTripCapacity` | сделано |
+| 2 | `3c8f2da` | Точки A+B: `adjustTripCapacity` в `PUT /offers` | сделано |
+| 3 | `f83ae41` | Точки C+D+E: chat proposal + admin | сделано |
+| 4 | `f331449` | Точка F: каскад отмены офферов при `DELETE /trips` | сделано |
+| 5 | `2efaec0` | Точка G: `active→matched` lock + reverse path + SW v4.0.40 | сделано |
 
-Каждый коммит проходит: `typecheck` ✅ `lint` ✅ `test` ✅ `build` ✅
+**MiMo: волна 2 выполнена. typecheck ✅ lint ✅ test ✅ (37/37) build ✅. Готово, жду проверки Claude.**
 
 #### Проверка Claude: дизайн волны 2 v3 — ПРИНЯТ — 2026-09-14
 
