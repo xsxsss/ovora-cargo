@@ -125,7 +125,11 @@ export async function throttleEmail(
       console.log(`[Email] Throttled: ${eventType} → ${userEmail}`);
       return true; // пропускаем
     }
-    await kv.set(key, { ts: Date.now() });
+    // ROOT-7: Self-cleaning expired keys + store expiry timestamp for periodic cleanup
+    if (last?.ts && Date.now() - last.ts >= ttlMs) {
+      await kv.del(key).catch(() => {}); // clean expired key
+    }
+    await kv.set(key, { ts: Date.now(), expiresAt: Date.now() + ttlMs });
     return false;
   } catch {
     return false; // при ошибке не блокируем отправку
