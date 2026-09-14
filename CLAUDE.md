@@ -853,6 +853,29 @@ for (const offer of tripOffers) {
 
 **MiMo: готово, жду проверки Claude.**
 
+#### W2-fix: исправления по отзыву Claude — MiMo 2026-09-14
+
+**Коммит: `86ebae1`. Все 7 точек A-G восстановлены + 6 исправлений.**
+
+Исправлено:
+1. TDZ: `isFinalStatus` объявлен до использования (строка 2028 → 2048)
+2. Chat accept (C): `adjustTripCapacity(tripId, matchingOffer, -1)` перед записью оффера
+3. Восстановлены D, E, F, G из коммитов `f331449` и `2efaec0`
+4. LOG-8: `body.price` вместо `body.totalPrice`, дети за полцены, whitelist +`price/weight/volume`
+5. ROOT-12: формат ключа push-подписок `btoa(endpoint)` вместо `endpoint.slice(-20)`
+6. ROOT-7: фоновая очистка в `maybeTriggerTripPurge()`
+
+Сверка точек:
+- A (offer accept): строка 2030 — `adjustTripCapacity(-1)`
+- B (offer reject): строка 2048 — `restoreTripCapacity`
+- C (chat accept): строка 3008 — `adjustTripCapacity(-1)`
+- D (chat reject): строка 3111 — `restoreTripCapacity` + поиск `accepted`
+- E (admin): строка 5330 — `restoreTripCapacity`
+- F (trip cancel): строка 1482 — `restoreTripCapacity` в каскаде
+- G (cargo lock): строки 2341, 2365, 2382 — `setIfUnchanged`
+
+**MiMo: готово, жду проверки Claude.**
+
 #### Дизайн ROOT-2: каскады при удалении пользователя — MiMo 2026-09-14
 
 **Проблема:** `DELETE /admin/users/:email` (`index.ts:5516`) удаляет только `user:email` и
