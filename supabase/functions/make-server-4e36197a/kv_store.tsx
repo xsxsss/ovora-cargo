@@ -87,6 +87,20 @@ export const getByPrefix = async (prefix: string): Promise<any[]> => {
   return data?.map((d) => d.value) ?? [];
 };
 
+// Delete all keys matching a prefix where the value's expiresAt is in the past.
+export const deleteExpiredByPrefix = async (prefix: string): Promise<number> => {
+  const supabase = client();
+  const escaped = prefix.replace(/[%_]/g, (ch) => `\\${ch}`);
+  const { data, error } = await supabase
+    .from('kv_store_4e36197a')
+    .delete()
+    .like('key', escaped + '%')
+    .lt('value->>expiresAt', new Date().toISOString())
+    .select('key');
+  if (error) throw new Error(error.message);
+  return data?.length ?? 0;
+};
+
 // Conditional write: updates value only if the current updatedAt matches expectedUpdatedAt.
 // Returns true if the row was updated (lock acquired), false if someone else wrote first.
 // Only works on EXISTING keys — use set() to create new records.

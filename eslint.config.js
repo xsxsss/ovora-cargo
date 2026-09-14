@@ -37,6 +37,12 @@ export default [
     },
   },
   {
+    files: ['src/app/api/**/*.{ts,tsx}'],
+    rules: {
+      '@typescript-eslint/no-explicit-any': 'warn',
+    },
+  },
+  {
     ignores: ['dist/', 'node_modules/', 'supabase/', 'public/', '*.config.js', '*.config.ts'],
   },
 ];
