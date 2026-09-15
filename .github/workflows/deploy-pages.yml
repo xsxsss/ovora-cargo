@@ -4,7 +4,7 @@ on:
   push:
     # claude/** и mimo/** — ветки агентов: CI их проверяет, но на сайт не выкладывает
     # (шаги upload/deploy ниже срабатывают только для main).
-    branches: [main, 'claude/**', 'mimo/**']
+    branches: [main, staging, 'claude/**', 'mimo/**']
   workflow_dispatch:
 
 permissions:
