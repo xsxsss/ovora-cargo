@@ -25,5 +25,6 @@ jobs:
         run: |
           supabase functions deploy make-server-4e36197a --project-ref "$PROJECT_REF"
         env:
-          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          # У каждого проекта свой токен: SUPABASE_ACCESS_TOKEN1 — боевой, SUPABASE_ACCESS_TOKEN — тестовый.
+          SUPABASE_ACCESS_TOKEN: ${{ github.ref == 'refs/heads/main' && secrets.SUPABASE_ACCESS_TOKEN1 || secrets.SUPABASE_ACCESS_TOKEN }}
           PROJECT_REF: ${{ github.ref == 'refs/heads/main' && 'mkbcjxnoeevtkzaqcpsh' || 'xrtqquuwlnnihphszyns' }}

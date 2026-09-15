@@ -42,6 +42,10 @@ Cloudflare собирает сам на push в `main` (`npm run build` → `npx
 Pages для коммерческих сервисов, выключить после переезда пользователей. Новый адрес сайта — добавлять в
 `ALLOWED_ORIGINS` (`index.ts`), в `public/_headers` и в настройки счётчика Метрики.
 
+**Токены Supabase в GitHub** — у каждого проекта свой (токен создаётся с доступом к одному проекту):
+`SUPABASE_ACCESS_TOKEN1` — боевой `mkbcjxnoeevtkzaqcpsh`, `SUPABASE_ACCESS_TOKEN` — тестовый `xrtqquuwlnnihphszyns`.
+Выпуск сервера из `main` без `SUPABASE_ACCESS_TOKEN1` падает с 403 — сайт при этом выходит, а сервер нет.
+
 **Тестовая площадка (staging):** `git push origin HEAD:staging` → сервер уходит в тестовый проект Supabase
 `xrtqquuwlnnihphszyns`, сайт — на `staging-ovora-cargo.saburov.workers.dev` с плашкой «ТЕСТОВАЯ ВЕРСИЯ».
 База выбирается по адресу страницы (`utils/supabase/info.ts`): версии веток и localhost — тестовая, остальное —
