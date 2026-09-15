@@ -123,6 +123,15 @@ test.describe.serial('бронирование мест', () => {
     expect((await getTrip(request, tripId)).availableSeats).toBe(1);
   });
 
+  test('вторую ожидающую заявку на ту же поездку не создать', async ({ request }) => {
+    const res = await request.post(`${API}/offers`, {
+      headers: as(sender2Token),
+      data: { tripId, senderEmail: sender2, senderName: 'S2', requestedSeats: 1, price: 100 },
+    });
+    expect(res.status()).toBe(409);
+    expect((await res.json()).offer?.offerId).toBe(offer2Id);
+  });
+
   test('отправитель отменяет принятую бронь — места возвращаются', async ({ request }) => {
     const res = await request.put(`${API}/offers/${tripId}/${offerId}`, { headers: as(senderToken), data: { status: 'cancelled' } });
     expect(res.status(), await res.text()).toBe(200);
