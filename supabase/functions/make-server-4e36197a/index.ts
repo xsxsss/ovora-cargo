@@ -25,6 +25,7 @@ import * as capacity from "./capacity.tsx";
 import * as store from "./bookingStore.tsx";
 import * as profile from "./profileStore.tsx";
 import { DOCUMENT_STATUSES, DOCUMENT_TYPES } from "./profileRows.tsx";
+import { decideAutoVerification } from "./docVerification.tsx";
 import { usePermCodeUserLookup } from "./permCode.tsx";
 import { Blacklist } from "./blacklist.tsx";
 import { AuditLog as CargoAuditLog } from "./cargoAudit.tsx";
@@ -4207,89 +4208,22 @@ async function extractDocumentData(
 }
 
 /**
- * 🤖 Автоматическая верификация документа
- * Проверяет ТОЛЬКО срок действия и соответствие ФИО
- * ❌ Качество фото НЕ проверяется - если данные читаются, документ проходит!
+ * 🤖 Автоматическая проверка документа — правило в docVerification.tsx: одобряется только прочитанное
+ * с фото. Здесь — только данные для решения: ФИО из уже одобренного паспорта пользователя.
  */
-async function autoVerifyDocument(
-  photoQualityScore: number,
-  expiryDate: string | null,
-  documentType: string,
-  userEmail: string,
-  extractedFullName: string | null
-): Promise<{ 
-  status: 'verified' | 'rejected' | 'pending'; 
-  rejectionReason?: string;
-  needsProfileUpdate?: boolean;
-}> {
-  // Тип не распознан или имя не извлечено → на ручную проверку админу
-  if (documentType === 'unknown' || !extractedFullName) {
-    console.log(`[autoVerify] Document sent to manual review: type=${documentType}, name=${extractedFullName ? "found" : "none"}`);
-    return { status: 'pending' };
+async function autoVerifyDocument(input: {
+  documentType: string; detectedType: string; ocrFullName: string | null; ocrExpiryDate: string | null;
+  manualExpiryDate: string | null; userEmail: string;
+}) {
+  let verifiedPassportName: string | null = null;
+  if (input.documentType !== 'passport') {
+    const docs: any[] = await profile.documents.listByUser(supabase, input.userEmail);
+    const passport = docs.find(d => d.type === 'passport' && (d.status === 'verified' || d.status === 'approved'));
+    verifiedPassportName = passport?.extractedFullName || null;
   }
-
-  const today = new Date();
-  
-  // ✅ 1. ОСНОВНАЯ ПРОВЕРКА: Срок действия документа (просрочен или нет)
-  if (expiryDate) {
-    const expiry = new Date(expiryDate);
-    const daysLeft = Math.floor((expiry.getTime() - today.getTime()) / 86400000);
-    
-    if (daysLeft < 0) {
-      return {
-        status: 'rejected',
-        rejectionReason: `Документ просрочен. Срок действия истек ${Math.abs(daysLeft)} дней назад. Обновите документ.`
-      };
-    }
-    
-    // Если срок истекает через 30 дней или меньше - одобряем, но отправим уведомление
-    if (daysLeft <= 30) {
-      console.log(`[autoVerify] Document ${documentType} expires in ${daysLeft} days - will send notification`);
-    }
-  }
-  
-  // ✅ 2. Проверка соответствия ФИО с другими документами
-  // 🔑 ВАЖНО: Паспорт = эталонный документ, он ВСЕГДА обновляет профиль без проверки
-  // Для других документов проверяем соответствие с паспортом
-  if (extractedFullName && documentType !== 'passport') {
-    // Получаем все документы пользователя
-    const allDocs: any[] = await profile.documents.listByUser(supabase, userEmail);
-    const verifiedDocs = allDocs.filter(d => d && d.status === 'verified' && d.extractedFullName);
-    
-    // Ищем паспорт среди одобренных документов
-    const passportDoc = verifiedDocs.find(d => d.type === 'passport');
-    
-    if (passportDoc) {
-      // Если паспорт уже есть - проверяем соответствие ФИО с паспортом
-      const passportName = passportDoc.extractedFullName?.trim().toLowerCase();
-      const newName = extractedFullName.trim().toLowerCase();
-      
-      if (passportName && newName && passportName !== newName) {
-        return {
-          status: 'rejected',
-          rejectionReason: `ФИО в документе "${extractedFullName}" не совпадает с паспортом "${passportDoc.extractedFullName}". Все документы должны быть на одно лицо.`
-        };
-      }
-    }
-  }
-  
-  // ❌ 3. КАЧЕСТВО ФОТО НЕ ПРОВЕРЯЕТСЯ!
-  // Если данные могут быть прочитаны - документ проходит без проблем
-  console.log(`[autoVerify] Quality check SKIPPED (${photoQualityScore}%) - focusing on data, not photo quality`);
-  
-  // ✅ 4. Если это паспорт - ВСЕГДА обновляем профиль (паспорт = эталон)
-  const needsProfileUpdate = documentType === 'passport' && extractedFullName !== null;
-  
-  console.log(`[autoVerify] Document verified!`);
-  console.log(`[autoVerify] - Document type: ${documentType}`);
-  ocrDebug(`[autoVerify] - Extracted name: ${extractedFullName}`);
-  console.log(`[autoVerify] - Needs profile update: ${needsProfileUpdate}`);
-  
-  // ✅ 5. Все проверки пройдены - автоматическое одобрение!
-  return { 
-    status: 'verified',
-    needsProfileUpdate
-  };
+  const decision = decideAutoVerification({ ...input, verifiedPassportName, now: new Date() });
+  console.log(`[autoVerify] ${input.documentType}: ${decision.status}${decision.reviewReason ? ` (${decision.reviewReason})` : ''}`);
+  return decision;
 }
 
 /**
@@ -4457,13 +4391,14 @@ app.post("/make-server-4e36197a/documents/upload", async (c) => {
     // 4. 🤖 АВТОМАТИЧЕСКАЯ ВЕРИФИКАЦИЯ
     // ✅ Проверяется: срок действия + соответствие ФИО
     // ❌ НЕ проверяется: качество фото (если данные читаются - проходит!)
-    const verification = await autoVerifyDocument(
-      photoQualityScore, 
-      expiryDate, 
+    const verification = await autoVerifyDocument({
       documentType,
+      detectedType,
+      ocrFullName: extractedData.fullName || null,
+      ocrExpiryDate: extractedData.expiryDate || null,
+      manualExpiryDate: expiryDate,
       userEmail,
-      finalFullName
-    );
+    });
     console.log(`[documents/upload] Auto-verification result:`, verification);
 
     // 5. Save document metadata (номер документа profileStore шифрует сам)
@@ -4475,7 +4410,7 @@ app.post("/make-server-4e36197a/documents/upload", async (c) => {
       type: documentType,
       title,
       subtitle,
-      status: verification.status, // ✅ Автоматический статус: verified или rejected
+      status: verification.status, // verified, rejected или pending (ручная проверка)
       photoPath: path,
       uploadDate: now,
       expiryDate: expiryDate || null,
@@ -4579,6 +4514,19 @@ app.post("/make-server-4e36197a/documents/upload", async (c) => {
             console.log(`[documents/upload] Expiry warning notification created for user ${userEmail} (${daysLeft} days left)`);
           }
         }
+      } else if (verification.status === 'pending') {
+        // На ручной проверке — не «отклонён»: раньше человек получал уведомление об отказе.
+        await kv.set(`ovora:notification:${userEmail}:${notificationId}`, {
+          id: notificationId,
+          userEmail: userEmail,
+          type: 'document',
+          iconName: 'ShieldCheck',
+          iconBg: 'bg-blue-500/10 text-blue-500',
+          title: 'Документ на проверке',
+          description: `${title} отправлен администратору на проверку. Мы сообщим о результате.`,
+          isUnread: true,
+          createdAt: now,
+        });
       } else {
         // ❌ Документ отклонен автоматически
         await kv.set(`ovora:notification:${userEmail}:${notificationId}`, {
