@@ -32,11 +32,19 @@
 все деплои `BLOCKED`, снять паузу через API нельзя — 403). Поэтому проект
 переехал на новый аккаунт.
 
-**Живой сайт:** https://xsxsss.github.io/ovora-cargo/ (GitHub Pages)
+**Живой сайт:** https://ovora-cargo.saburov.workers.dev (Cloudflare Workers, из корня `/`).
+Cloudflare собирает сам на push в `main` (`npm run build` → `npx wrangler deploy`, настройки в `wrangler.jsonc`,
+заголовки безопасности — `public/_headers`). Переменные сборки (`NODE_VERSION`, `VITE_YANDEX_METRIKA_ID`,
+`VITE_SENTRY_DSN`) заданы в кабинете Cloudflare → Settings → Builds, не в репозитории.
+Ветки получают тестовые адреса `<версия>-ovora-cargo.saburov.workers.dev` — они разрешены в CORS.
+
+Старый адрес https://xsxsss.github.io/ovora-cargo/ (GitHub Pages) пока работает параллельно: GitHub запрещает
+Pages для коммерческих сервисов, выключить после переезда пользователей. Новый адрес сайта — добавлять в
+`ALLOWED_ORIGINS` (`index.ts`), в `public/_headers` и в настройки счётчика Метрики.
 
 **Деплой:**
 ```bash
-git push origin HEAD:main    # пуш → GitHub Actions → Pages, ~1-2 мин
+git push origin HEAD:main    # пуш → Cloudflare и GitHub Pages собирают сайт, бэкенд уходит в Supabase
 ```
 
 **Base-путь определяется автоматически** — не зашивай его константой:
