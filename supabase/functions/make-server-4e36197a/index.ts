@@ -13,7 +13,9 @@ import {
   requireRole,
   isAdminCaller,
 } from "./adminAuth.tsx";
-import { rateLimitMiddleware, RL } from "./rateLimit.tsx";
+import { rateLimitMiddleware, RL, aviaRL } from "./rateLimit.tsx";
+import { requestLimitPolicy, ADMIN_AUTH_FAILURES, type Identity } from "./requestLimits.tsx";
+import { verifiedAviaPhone } from "./aviaAuth.tsx";
 import { calculateAverageRating, recalculateRating } from "./rating.tsx";
 import * as kv from "./kv_store.tsx";
 import * as capacity from "./capacity.tsx";
@@ -342,6 +344,27 @@ app.use("/*", async (c, next) => {
   return await next();
 });
 
+// ── Общий лимит частоты на все адреса ────────────────────────────────────────
+// Вошедшие считаются по аккаунту (токен проверен, подделать нельзя), остальные по IP.
+// Лимит в памяти экземпляра функции: при нескольких экземплярах он приблизительный,
+// но спам и перебор с одного источника отсекает.
+app.use("/*", async (c, next) => {
+  const email = c.get("verifiedEmail") as string | undefined;
+  const phone = email ? null : await verifiedAviaPhone(c);
+  const identity: Identity = email ? { kind: 'user', id: email }
+    : phone ? { kind: 'avia', id: phone }
+    : { kind: 'ip', id: c.req.header('x-forwarded-for') || 'unknown' };
+  const policy = requestLimitPolicy(c.req.method, c.req.path, identity);
+  if (!policy) return await next();
+  const result = aviaRL.check(policy.bucket, policy.max, policy.windowMs);
+  if (!result.allowed) {
+    console.warn(`[RateLimit] BLOCKED ${policy.bucket} | ${c.req.method} ${c.req.path}`);
+    c.header('Retry-After', String(Math.ceil(result.retryAfterMs / 1000)));
+    return c.json({ error: 'Слишком много запросов. Подождите и попробуйте снова.', retryAfterMs: result.retryAfterMs }, 429);
+  }
+  return await next();
+});
+
 // ── Admin Middleware — защита всех /admin/* и /kv/* маршрутов ─────────────────
 // Логика вынесена в adminAuth.tsx (юнит-тестируется отдельно от Hono/Deno-обвязки).
 type AdminRole = AdminRoleType;
@@ -362,8 +385,20 @@ async function isAdminJwtRevoked(issuedAtSec: number): Promise<boolean> {
     return false;
   }
 }
+// Перебор кода админки: X-Admin-Code принимается на любом адресе /admin/*, поэтому лимит
+// самого /admin/auth его не защищает. Неудачные попытки с IP считаются на всех адресах.
 async function requireAdminChecked(c: any, next: any) {
-  return await requireAdmin(c, next, isAdminJwtRevoked);
+  const failKey = `admin-auth-fail:${c.req.header('x-forwarded-for') || 'unknown'}`;
+  if (aviaRL.isBlocked(failKey)) {
+    console.warn(`[requireAdmin] Too many failed admin attempts: ${failKey}`);
+    return c.json({ error: 'Слишком много неудачных попыток. Подождите 15 минут.' }, 429);
+  }
+  const hadCredentials = !!(c.req.header('X-Admin-Code') || c.req.header('X-Admin-Token'));
+  const response = await requireAdmin(c, next, isAdminJwtRevoked);
+  if (hadCredentials && !c.get('adminRole')) {
+    aviaRL.check(failKey, ADMIN_AUTH_FAILURES.max, ADMIN_AUTH_FAILURES.windowMs);
+  }
+  return response;
 }
 
 // Кто именно выполнил админ-действие — роль из проверенного токена.

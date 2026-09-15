@@ -52,6 +52,12 @@ class TokenBucketLimiter {
     };
   }
 
+  /** Исчерпан ли лимит — без расходования попытки. */
+  isBlocked(id: string): boolean {
+    const bucket = this.buckets.get(id);
+    return !!bucket && Date.now() < bucket.windowEnd && bucket.tokens <= 0;
+  }
+
   /** Сбросить лимит (после успешной смены PIN, выхода и т.д.) */
   reset(id: string): void {
     // MIGRATION: await redis.del(id)

@@ -36,6 +36,19 @@ export async function signAviaToken(phone: string): Promise<string | undefined> 
     .sign(secret);
 }
 
+/** Телефон владельца проверенного X-Avia-Token или null. */
+export async function verifiedAviaPhone(c: any): Promise<string | null> {
+  const secret = getSecret();
+  const token = (c.req.header('X-Avia-Token') || '').trim();
+  if (!secret || !token) return null;
+  try {
+    const { payload } = await jwtVerify(token, secret);
+    return typeof payload.phone === 'string' ? payload.phone : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Проверяет, что claimedPhone (значение, которое клиент передал как «это я»)
  * действительно принадлежит владельцу токена в заголовке X-Avia-Token.
