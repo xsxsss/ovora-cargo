@@ -240,7 +240,11 @@ export async function handleSetCode(c: Context) {
     await kv.del(emailVerifiedKey(email));
 
     console.log(`[PermCode] ✅ User-defined code set for ${email} | hash: ${codeHash.slice(0, 12)}...`);
-    return c.json({ success: true, message: "Код установлен" });
+    // Почта только что подтверждена кодом из письма — это такой же вход, как verify-perm-code.
+    // Без токена новый пользователь после регистрации не мог ничего опубликовать до перезахода.
+    await recordLoginDevice('cargo', email, c);
+    const token = await signUserToken(email);
+    return c.json({ success: true, message: "Код установлен", token });
 
   } catch (err) {
     console.log("Error POST /auth/set-code:", err);

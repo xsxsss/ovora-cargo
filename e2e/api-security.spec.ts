@@ -55,6 +55,30 @@ test.describe('без входа нельзя действовать от чуж
     denied(res.status());
   });
 
+  test('перезаписать чужой профиль через регистрацию', async ({ request }) => {
+    const res = await request.post(`${API}/auth/register`, {
+      headers: siteHeaders(),
+      data: { email: 'victim@mail.ru', role: 'driver', firstName: 'Hacked', phone: '+992000000000' },
+    });
+    expect(res.status()).toBe(403);
+  });
+
+  test('изменить чужой профиль', async ({ request }) => {
+    const res = await request.put(`${API}/auth/user`, {
+      headers: siteHeaders(),
+      data: { email: 'victim@mail.ru', firstName: 'Hacked' },
+    });
+    expect(res.status()).toBe(403);
+  });
+
+  test('узнать имя и телефон человека по email', async ({ request }) => {
+    const res = await request.post(`${API}/auth/login-email`, {
+      headers: siteHeaders(),
+      data: { email: 'victim@mail.ru' },
+    });
+    expect(res.status()).toBe(403);
+  });
+
   test('читать чужую переписку', async ({ request }) => {
     const res = await request.get(`${API}/chat/pair_x_y/messages?callerEmail=victim@mail.ru`, { headers: siteHeaders() });
     denied(res.status());

@@ -1057,6 +1057,10 @@ app.post("/make-server-4e36197a/auth/register",
     const body = await c.req.json();
     const { email, firstName, lastName, phone, role, vehicle } = body;
     if (!email || !role) return c.json({ error: "email and role are required" }, 400);
+    // Регистрация идёт после подтверждения почты (set-code / verify-perm-code выдают токен).
+    // Без проверки любой перезаписывал чужой профиль: роль, имя, телефон.
+    if (!isActingAs(c, email)) return c.json(FORBIDDEN_NOT_YOU, 403);
+    if (role !== 'driver' && role !== 'sender') return c.json({ error: "role must be driver or sender" }, 400);
 
     const lenErr = assertMaxLen({ email, firstName, lastName, phone, vehicle },
       { email: 254, firstName: 60, lastName: 60, phone: 20, vehicle: 100 });
@@ -1128,6 +1132,8 @@ app.post("/make-server-4e36197a/auth/login-email",
   try {
     const { email } = await c.req.json();
     if (!email) return c.json({ error: "email required" }, 400);
+    // Профиль отдаётся только владельцу почты: раньше по любому email отдавались имя, телефон и роль.
+    if (!isActingAs(c, email)) return c.json(FORBIDDEN_NOT_YOU, 403);
     const user = await kv.get(`ovora:user:email:${email.toLowerCase().trim()}`);
     if (!user) return c.json({ found: false });
     // ── Проверка блокировки ────────────────────────────────────────────────
@@ -1145,30 +1151,6 @@ app.post("/make-server-4e36197a/auth/login-email",
   }
 });
 
-app.post("/make-server-4e36197a/auth/login-phone",
-  rateLimitMiddleware(RL.LOGIN, (c) => `login:${c.req.header('x-forwarded-for') || 'unknown'}`),
-  async (c) => {
-  try {
-    const { phone } = await c.req.json();
-    if (!phone) return c.json({ error: "phone required" }, 400);
-    const clean = phone.replace(/\D/g, "");
-    const emailRef: any = await kv.get(`ovora:user:phone:${clean}`);
-    if (!emailRef) return c.json({ found: false });
-    const user = await kv.get(`ovora:user:email:${emailRef}`);
-    if (!user) return c.json({ found: false });
-    // ── Проверка блокировки ────────────────────────────────────────────────
-    if ((user as any)?.status === "blocked") {
-      console.log(`[auth/login-phone] Blocked user: ${emailRef}`);
-      return c.json({ found: false, blocked: true, error: "Ваш аккаунт заблокирован. Обратитесь в поддержку." }, 403);
-    }
-    const safeUser = { ...(user as any) };
-    delete safeUser.codeHash; delete safeUser.passportNumber; delete safeUser.passportData;
-    return c.json({ found: true, user: safeUser });
-  } catch (err) {
-    console.log("Error /auth/login-phone:", err);
-    return c.json({ error: 'Внутренняя ошибка сервера' }, 500);
-  }
-});
 
 // Fields users must never be allowed to change via self-service update
 const USER_PROTECTED_FIELDS = new Set([
@@ -1181,6 +1163,7 @@ app.put("/make-server-4e36197a/auth/user", async (c) => {
     const body = await c.req.json();
     const { email, ...rawUpdates } = body;
     if (!email) return c.json({ error: "email required" }, 400);
+    if (!isActingAs(c, email)) return c.json(FORBIDDEN_NOT_YOU, 403);
     const key = `ovora:user:email:${email.toLowerCase().trim()}`;
     const existing: any = await kv.get(key);
     if (!existing) return c.json({ error: "User not found" }, 404);

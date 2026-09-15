@@ -2,6 +2,7 @@ import { projectId, publicAnonKey } from '../../../utils/supabase/info';
 import { cacheClear as clearApiCache, adminHeaders } from './dataApi';
 import { CSRF_HEADER, CSRF_TOKEN } from './csrfToken';
 import { claimCacheOwner, releaseCacheOwner } from './sessionScope';
+import { withUserToken } from './userToken';
 
 // authApi v2 - with getCachedUser export
 const BASE = `https://${projectId}.supabase.co/functions/v1/make-server-4e36197a`;
@@ -155,7 +156,7 @@ export function getCachedUser(): Partial<OvoraUser> | null {
 export async function registerUser(user: Partial<OvoraUser>): Promise<OvoraUser> {
   const res = await fetch(`${BASE}/auth/register`, {
     method: 'POST',
-    headers: HEADERS,
+    headers: withUserToken(HEADERS),
     body: JSON.stringify(user),
   });
   if (!res.ok) {
@@ -177,22 +178,10 @@ export async function registerUser(user: Partial<OvoraUser>): Promise<OvoraUser>
 export async function findUserByEmail(email: string): Promise<OvoraUser | null> {
   const res = await fetch(`${BASE}/auth/login-email`, {
     method: 'POST',
-    headers: HEADERS,
+    headers: withUserToken(HEADERS),
     body: JSON.stringify({ email }),
   });
   if (!res.ok) throw new Error(`Ошибка поиска: ${await res.text()}`);
-  const data = await res.json();
-  if (data.error) throw new Error(data.error);
-  return data.found ? data.user : null;
-}
-
-export async function findUserByPhone(phone: string): Promise<OvoraUser | null> {
-  const res = await fetch(`${BASE}/auth/login-phone`, {
-    method: 'POST',
-    headers: HEADERS,
-    body: JSON.stringify({ phone }),
-  });
-  if (!res.ok) throw new Error(`Ошибка поиска по телефону: ${await res.text()}`);
   const data = await res.json();
   if (data.error) throw new Error(data.error);
   return data.found ? data.user : null;
@@ -215,7 +204,7 @@ export function loginUser(user: OvoraUser) {
 export async function updateUser(updates: Partial<OvoraUser> & { email: string }): Promise<OvoraUser> {
   const res = await fetch(`${BASE}/auth/user`, {
     method: 'PUT',
-    headers: HEADERS,
+    headers: withUserToken(HEADERS),
     body: JSON.stringify(updates),
   });
   if (!res.ok) throw new Error(`Ошибка обновления: ${await res.text()}`);
@@ -327,6 +316,10 @@ export async function setUserCode(email: string, code: string): Promise<void> {
   });
   const data = await res.json();
   if (!res.ok || !data.success) throw new Error(data.error || 'Ошибка установки кода');
+  claimCacheOwner(`cargo:${email.trim().toLowerCase()}`);
+  if (data.token) {
+    try { localStorage.setItem(USER_TOKEN_KEY, data.token); } catch { /* ignore */ }
+  }
 }
 
 /**
