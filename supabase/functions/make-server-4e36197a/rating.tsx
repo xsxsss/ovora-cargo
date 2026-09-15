@@ -7,9 +7,9 @@ export function calculateAverageRating(ratings: number[]): number {
 }
 
 // LOG-14: пересчёт рейтинга после нового или удалённого отзыва. Рейтинг пишется в профиль и
-// в карточки поездок водителя; поездки обновляет переданная функция (они в таблице trips).
+// в карточки поездок водителя — это делает переданная функция (профиль и поездки в таблицах).
 export async function recalculateRating(
-  kv: any, targetEmail: string, setTripsRating: (driverEmail: string, rating: number) => Promise<void>,
+  kv: any, targetEmail: string, applyRating: (email: string, rating: number) => Promise<void>,
 ): Promise<void> {
   const targetIndex: any[] = await kv.getByPrefix(`ovora:userreviews:target:${targetEmail}:`);
   const reviewIds = [...new Set(targetIndex.filter((e: any) => e?.reviewId).map((e: any) => e.reviewId))];
@@ -18,9 +18,5 @@ export async function recalculateRating(
     : [];
   const avgRating = reviews.length > 0 ? calculateAverageRating(reviews.map((r: any) => r.rating)) : 0;
 
-  const userKey = `ovora:user:email:${targetEmail.toLowerCase().trim()}`;
-  const user: any = await kv.get(userKey);
-  if (user) await kv.set(userKey, { ...user, rating: avgRating });
-
-  await setTripsRating(targetEmail, avgRating);
+  await applyRating(targetEmail, avgRating);
 }

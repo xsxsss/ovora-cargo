@@ -17,6 +17,15 @@ import { rememberAuthUserId } from "./authIdentity.tsx";
 import { recordLoginDevice } from "./deviceInfo.tsx";
 
 const MAX_ATTEMPTS = 10;
+
+// Пользователи — в таблице (profileStore). index.ts подключает чтение при старте; без него проверка
+// блокировки не молчит, а падает — заблокированный не должен войти из-за забытой настройки.
+let loadUser: (email: string) => Promise<any | null> = () => {
+  throw new Error('[PermCode] user lookup not configured: call usePermCodeUserLookup');
+};
+export function usePermCodeUserLookup(fn: (email: string) => Promise<any | null>) {
+  loadUser = fn;
+}
 const BCRYPT_ROUNDS = 12; // Высокий cost-фактор = медленный брутфорс
 
 // ✅ FIX N-2: in-process rate limiter для /auth/email-check (5 запросов / 60s на IP)
@@ -67,7 +76,7 @@ export async function handleEmailCheck(c: Context) {
     }
 
     // ── Проверка блокировки пользователя ─────────────────────────────────────
-    const userRecord: any = await kv.get(`ovora:user:email:${email}`);
+    const userRecord: any = await loadUser(email);
     if (userRecord?.status === "blocked") {
       console.log(`[PermCode] 🚫 Blocked user tried to check email: ${email}`);
       return c.json({ success: false, error: "Ваш аккаунт заблокирован. Обратитесь в поддержку.", blocked: true }, 403);
@@ -127,7 +136,7 @@ export async function handleSendEmailCode(c: Context) {
       return c.json({ success: false, error: "Некорректный email адрес" }, 400);
     }
 
-    const userRecord: any = await kv.get(`ovora:user:email:${email}`);
+    const userRecord: any = await loadUser(email);
     if (userRecord?.status === "blocked") {
       return c.json({ success: false, error: "Ваш аккаунт заблокирован. Обратитесь в поддержку.", blocked: true }, 403);
     }
@@ -267,7 +276,7 @@ export async function handleVerifyPermCode(c: Context) {
     }
 
     // ── Проверка блокировки пользователя ─────────────────────────────────────
-    const userRecord: any = await kv.get(`ovora:user:email:${email}`);
+    const userRecord: any = await loadUser(email);
     if (userRecord?.status === "blocked") {
       console.log(`[PermCode] 🚫 Blocked user tried to verify code: ${email}`);
       return c.json({ success: false, error: "Ваш аккаунт заблокирован. Обратитесь в поддержку.", blocked: true }, 403);

@@ -23,6 +23,9 @@ import { calculateAverageRating, recalculateRating } from "./rating.tsx";
 import * as kv from "./kv_store.tsx";
 import * as capacity from "./capacity.tsx";
 import * as store from "./bookingStore.tsx";
+import * as profile from "./profileStore.tsx";
+import { DOCUMENT_STATUSES, DOCUMENT_TYPES } from "./profileRows.tsx";
+import { usePermCodeUserLookup } from "./permCode.tsx";
 import { Blacklist } from "./blacklist.tsx";
 import { AuditLog as CargoAuditLog } from "./cargoAudit.tsx";
 import { AuditLog as AviaAuditLog } from "./aviaAudit.tsx";
@@ -111,7 +114,8 @@ async function notifyTripCancelled(cancelled: CancelledOffer[], trip: any, reaso
 }
 
 /** Рейтинг водителя в карточках его поездок (карточка — поле data, места не трогаются). */
-async function setDriverTripsRating(driverEmail: string, rating: number): Promise<void> {
+async function applyUserRating(driverEmail: string, rating: number): Promise<void> {
+  await profile.users.patch(supabase, driverEmail, { rating });
   for (const trip of await store.trips.listByDriver(supabase, driverEmail)) {
     if (trip.deletedAt || trip.driverRating === rating) continue;
     await store.trips.patch(supabase, trip.id, { driverRating: rating });
@@ -191,10 +195,14 @@ async function cascadeDeletedUser(email: string): Promise<Record<string, number>
     await kv.del(`ovora:push:sub:${email}:${subId}`).catch(() => {});
     counts.pushSubs++;
   }
-  const docs: any[] = await kv.getByPrefix(`ovora:document:${email}:`);
-  for (const doc of docs) {
-    if (doc?.id) { await kv.del(`ovora:document:${email}:${doc.id}`).catch(() => {}); counts.documents++; }
+  // Записи документов база удаляет вместе с пользователем (cascade); сканы в Storage — здесь.
+  const docs = await profile.documents.listByUser(supabase, email);
+  const scanPaths = docs.map(d => d.photoPath).filter(Boolean);
+  if (scanPaths.length) {
+    const { error } = await supabase.storage.from(BUCKET).remove(scanPaths);
+    if (error) console.warn('[cascadeDeletedUser] scans not removed:', error.message);
   }
+  counts.documents = docs.length;
 
   return counts;
 }
@@ -677,11 +685,8 @@ app.post("/make-server-4e36197a/e2e/login", async (c) => {
   const role = body?.role === "driver" ? "driver" : "sender";
   if (!isE2eEmail(email)) return c.json({ error: "Only e2e+<name>@ovora.test" }, 400);
 
-  const key = `ovora:user:email:${email}`;
-  if (!(await kv.get(key))) {
-    const now = new Date().toISOString();
-    await kv.set(key, { email, role, firstName: "E2E", lastName: role, phone: "", createdAt: now, updatedAt: now });
-  }
+  await profile.users.upsert(supabase, email, (existing) =>
+    existing || { email, role, firstName: "E2E", lastName: role, phone: "" });
   const token = await signUserToken(email);
   if (!token) return c.json({ error: "USER_JWT_SECRET not configured" }, 500);
   return c.json({ token, email, role });
@@ -928,7 +933,7 @@ app.post("/make-server-4e36197a/ocr/scan-document", async (c) => {
     if (!callerEmail) {
       return c.json({ error: 'callerEmail is required' }, 400);
     }
-    const callerUser = await kv.get(`ovora:user:email:${String(callerEmail).toLowerCase().trim()}`);
+    const callerUser = await profile.users.get(supabase, String(callerEmail).toLowerCase().trim());
     if (!callerUser) {
       return c.json({ error: 'Unauthorized: user not found' }, 401);
     }
@@ -974,7 +979,7 @@ app.post("/make-server-4e36197a/ocr/scan-document", async (c) => {
 
 // ═══════════���════════════════════���═════════════════════════════════════════════
 //  AUTH ROUTES
-//  KV: ovora:user:email:{email} / ovora:user:phone:{phone} → email
+//  Таблица users (profileStore.tsx)
 // ���═════════════════════════════════════════════════════════════════════════════
 
 app.post("/make-server-4e36197a/auth/register",
@@ -1004,27 +1009,23 @@ app.post("/make-server-4e36197a/auth/register",
       }
     }
 
-    const key = `ovora:user:email:${email.toLowerCase().trim()}`;
-    const existing: any = await kv.get(key) || {};
     const now = new Date().toISOString();
-    const isNewUser = !existing.createdAt; // первая регистрация
-
-    const user = {
-      ...existing,
-      email: clampStr(email, 254).toLowerCase(),
-      firstName: clampStr(firstName, 60) || existing.firstName || "",
-      lastName: clampStr(lastName, 60) || existing.lastName || "",
-      phone: clampStr(phone, 20) || existing.phone || "",
-      role,
-      vehicle: vehicle ? clampStr(vehicle, 100) : (existing.vehicle || null),
-      createdAt: existing.createdAt || now,
-      updatedAt: now,
-    };
-    await kv.set(key, user);
-    if (user.phone) {
-      const clean = user.phone.replace(/\D/g, "");
-      if (clean.length >= 7) await kv.set(`ovora:user:phone:${clean}`, user.email);
-    }
+    let isNewUser = false; // первая регистрация
+    const user: any = await profile.users.upsert(supabase, email, (current) => {
+      const existing: any = current || {};
+      isNewUser = !current;
+      return {
+        ...existing,
+        email: clampStr(email, 254).toLowerCase(),
+        firstName: clampStr(firstName, 60) || existing.firstName || "",
+        lastName: clampStr(lastName, 60) || existing.lastName || "",
+        phone: clampStr(phone, 20) || existing.phone || "",
+        role,
+        vehicle: vehicle ? clampStr(vehicle, 100) : (existing.vehicle || null),
+        createdAt: existing.createdAt || now,
+        updatedAt: now,
+      };
+    });
 
     // ── Приветственное письмо — только для НОВЫХ пользователей ───────────────
     if (isNewUser && user.email && user.firstName) {
@@ -1061,7 +1062,7 @@ app.post("/make-server-4e36197a/auth/login-email",
     if (!email) return c.json({ error: "email required" }, 400);
     // Профиль отдаётся только владельцу почты: раньше по любому email отдавались имя, телефон и роль.
     if (!isActingAs(c, email)) return c.json(FORBIDDEN_NOT_YOU, 403);
-    const user = await kv.get(`ovora:user:email:${email.toLowerCase().trim()}`);
+    const user = await profile.users.get(supabase, email.toLowerCase().trim());
     if (!user) return c.json({ found: false });
     // ── Проверка блокировки ────────────────────────────────────────────────
     if ((user as any)?.status === "blocked") {
@@ -1083,6 +1084,8 @@ app.post("/make-server-4e36197a/auth/login-email",
 const USER_PROTECTED_FIELDS = new Set([
   'role', 'status', 'codeHash', 'blocked', 'isVerified',
   'passportNumber', 'passportData', 'email', 'createdAt',
+  // Считает сервер: рейтинг — из отзывов, проверка документов — админ. Раньше их можно было прислать самому.
+  'rating', 'documentsVerified', 'updatedAt',
 ]);
 
 app.put("/make-server-4e36197a/auth/user", async (c) => {
@@ -1091,8 +1094,7 @@ app.put("/make-server-4e36197a/auth/user", async (c) => {
     const { email, ...rawUpdates } = body;
     if (!email) return c.json({ error: "email required" }, 400);
     if (!isActingAs(c, email)) return c.json(FORBIDDEN_NOT_YOU, 403);
-    const key = `ovora:user:email:${email.toLowerCase().trim()}`;
-    const existing: any = await kv.get(key);
+    const existing: any = await profile.users.get(supabase, email);
     if (!existing) return c.json({ error: "User not found" }, 404);
 
     // Strip protected fields — prevents privilege escalation
@@ -1101,10 +1103,8 @@ app.put("/make-server-4e36197a/auth/user", async (c) => {
       if (!USER_PROTECTED_FIELDS.has(k)) updates[k] = v;
     }
 
-    const updated = { ...existing, ...updates, email: existing.email, updatedAt: new Date().toISOString() };
-    await kv.set(key, updated);
-    const newPhone = updated.phone?.replace(/\D/g, "");
-    if (newPhone?.length >= 7) await kv.set(`ovora:user:phone:${newPhone}`, existing.email);
+    const updated: any = await profile.users.patch(supabase, email, updates);
+    if (!updated) return c.json({ error: "User not found" }, 404);
 
     // Профиль поменялся — обновляем карточку в Supabase Auth.
     syncAuthIdentity(updated.email, {
@@ -1126,7 +1126,7 @@ app.put("/make-server-4e36197a/auth/user", async (c) => {
 app.get("/make-server-4e36197a/auth/user/:email", async (c) => {
   try {
     const email = decodeURIComponent(c.req.param("email"));
-    const user: any = await kv.get(`ovora:user:email:${email.toLowerCase().trim()}`);
+    const user: any = await profile.users.get(supabase, email.toLowerCase().trim());
     if (!user) return c.json({ found: false });
     // ✅ FIX N-1 + PII: скрываем чувствительные поля в публичном профиле
     const { phone: _ph, birthDate: _bd, codeHash: _ch, passportNumber: _pn, passportData: _pd, ...safeUser } = user;
@@ -1489,8 +1489,8 @@ app.put("/make-server-4e36197a/trips/:id", async (c) => {
           const acceptedOffers = tripOffers.filter(o => o && o.status === 'accepted' && o.senderEmail);
           for (const offer of acceptedOffers) {
             const [senderUser, driverUser]: [any, any] = await Promise.all([
-              kv.get(`ovora:user:email:${offer.senderEmail}`).catch(() => null),
-              updated.driverEmail ? kv.get(`ovora:user:email:${updated.driverEmail}`).catch(() => null) : null,
+              profile.users.get(supabase, offer.senderEmail).catch(() => null),
+              updated.driverEmail ? profile.users.get(supabase, updated.driverEmail).catch(() => null) : null,
             ]);
             const senderFirstName = senderUser?.firstName || 'Клиент';
             const driverFirstName = driverUser?.firstName || 'Водитель';
@@ -1805,7 +1805,7 @@ app.post("/make-server-4e36197a/offers",
         }).catch(() => {});
 
         // ── Email водителю о новой оферте ────────────────────────────────────
-        const driverUser: any = await kv.get(`ovora:user:email:${offer.driverEmail}`).catch(() => null);
+        const driverUser: any = await profile.users.get(supabase, offer.driverEmail).catch(() => null);
         const driverFirstName = driverUser?.firstName || 'Водитель';
         ;(async () => {
           const throttled = await throttleEmail(offer.driverEmail, `new-offer-${tripId}`, 1_800_000); // 30 мин
@@ -2078,10 +2078,10 @@ app.put("/make-server-4e36197a/offers/:tripId/:offerId", async (c) => {
         ;(async () => {
           const throttled = await throttleEmail(existing.senderEmail, `offer-${newStatus}-${offerId}`, 3_600_000);
           if (!throttled) {
-            const senderUser: any = await kv.get(`ovora:user:email:${existing.senderEmail}`).catch(() => null);
+            const senderUser: any = await profile.users.get(supabase, existing.senderEmail).catch(() => null);
             const senderFirstName = senderUser?.firstName || 'Клиент';
             const driverUser: any = existing.driverEmail
-              ? await kv.get(`ovora:user:email:${existing.driverEmail}`).catch(() => null)
+              ? await profile.users.get(supabase, existing.driverEmail).catch(() => null)
               : null;
             const driverPhone = driverUser?.phone;
             const tpl = isAccepted
@@ -2388,7 +2388,7 @@ app.post("/make-server-4e36197a/reviews",
     // Снепшот рейтинга на карточках поездок водителя — иначе он замораживается
     // на момент создания поездки.
     if (review.targetEmail) {
-      await recalculateRating(kv, review.targetEmail, setDriverTripsRating).catch((e: any) =>
+      await recalculateRating(kv, review.targetEmail, applyUserRating).catch((e: any) =>
         console.log("[POST /reviews] Failed to refresh driverRating snapshot:", e)
       );
     }
@@ -2488,7 +2488,7 @@ app.delete("/make-server-4e36197a/reviews/:reviewId", async (c) => {
 
     // LOG-14: Recalculate rating after review deletion
     if (existing.targetEmail) {
-      await recalculateRating(kv, existing.targetEmail, setDriverTripsRating).catch((e: any) =>
+      await recalculateRating(kv, existing.targetEmail, applyUserRating).catch((e: any) =>
         console.warn('[DELETE /reviews] Failed to recalculate rating:', e)
       );
     }
@@ -2539,7 +2539,7 @@ app.post("/make-server-4e36197a/chat/init", async (c) => {
         return c.json({ error: "callerEmail must be one of participants" }, 400);
       }
       for (const email of proposed) {
-        const user = await kv.get(`ovora:user:email:${String(email).toLowerCase().trim()}`).catch(() => null);
+        const user = await profile.users.get(supabase, String(email).toLowerCase().trim()).catch(() => null);
         if (!user) {
           console.warn(`[chat/init] Rejected: participant ${email} is not a registered user`);
           return c.json({ error: `Participant ${email} is not a registered user` }, 400);
@@ -2668,7 +2668,7 @@ app.post("/make-server-4e36197a/chat/message", async (c) => {
             ;(async () => {
               const throttled = await throttleEmail(recipientEmail, `msg-${chatId}`, 1_800_000);
               if (!throttled) {
-                const recipientUser: any = await kv.get(`ovora:user:email:${recipientEmail}`).catch(() => null);
+                const recipientUser: any = await profile.users.get(supabase, recipientEmail).catch(() => null);
                 const recipientFirstName = recipientUser?.firstName || 'Пользователь';
                 const chatMeta: any = await kv.get(`ovora:chatmeta:${chatId}`).catch(() => null);
                 const tripRoute = chatMeta?.tripRoute;
@@ -2872,7 +2872,7 @@ app.put("/make-server-4e36197a/chat/:chatId/proposal/:proposalId", async (c) => 
               if (senderEmail) {
                 const trip: any = proposalTrip;
                 const tripRoute = trip ? `${trip.from} → ${trip.to}` : 'вашу поездку';
-                const driverUser: any = await kv.get(`ovora:user:email:${senderId}`);
+                const driverUser: any = await profile.users.get(supabase, senderId);
                 const driverName = driverUser ? `${driverUser.firstName} ${driverUser.lastName}` : 'Водитель';
                 const notificationId = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
                 await kv.set(`ovora:notification:${senderEmail}:${notificationId}`, {
@@ -2957,8 +2957,8 @@ app.put("/make-server-4e36197a/chat/:chatId/proposal/:proposalId", async (c) => 
               if (senderEmail) {
                 const trip: any = proposalTrip;
                 const tripRoute = trip ? `${trip.from} → ${trip.to}` : 'вашу поездку';
-                const driverUser: any = await kv.get(`ovora:user:email:${senderId}`);
-                const driverName = driverUser?.name || 'Водитель';
+                const driverUser: any = await profile.users.get(supabase, senderId);
+                const driverName = driverUser ? `${driverUser.firstName || ''} ${driverUser.lastName || ''}`.trim() || 'Водитель' : 'Водитель';
 
                 const notif = {
                   id: `notif_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`,
@@ -3300,8 +3300,8 @@ app.delete("/make-server-4e36197a/chat/:chatId/message/:msgId", async (c) => {
 });
 
 // ══════════════════════════════════════════════════════════════════════════════
-//  DOCUMENT VERIFICATION ROUTES (Supabase Storage + KV)
-//  KV: ovora:document:{userEmail}:{documentId} → document object
+//  DOCUMENT VERIFICATION ROUTES (Supabase Storage + таблица documents)
+//  Скан — в Storage, запись — profileStore.documents, номер документа — только шифром
 // ══════════════════════════════════════════════════════════════════════════════
 
 /**
@@ -4253,7 +4253,7 @@ async function autoVerifyDocument(
   // Для других документов проверяем соответствие с паспортом
   if (extractedFullName && documentType !== 'passport') {
     // Получаем все документы пользователя
-    const allDocs: any[] = await kv.getByPrefix(`ovora:document:${userEmail}:`);
+    const allDocs: any[] = await profile.documents.listByUser(supabase, userEmail);
     const verifiedDocs = allDocs.filter(d => d && d.status === 'verified' && d.extractedFullName);
     
     // Ищем паспорт среди одобренных документов
@@ -4311,10 +4311,18 @@ app.post("/make-server-4e36197a/documents/upload", async (c) => {
     if (!file || !userEmail || !documentId) {
       return c.json({ error: "file, userEmail and documentId required" }, 400);
     }
+    // Тип попадает в путь файла и в базу — только из списка.
+    if (!(DOCUMENT_TYPES as readonly string[]).includes(documentType)) {
+      return c.json({ error: `documentType must be one of: ${DOCUMENT_TYPES.join(', ')}` }, 400);
+    }
 
     // 🔒 IDOR: загружать документ можно только за себя (callerEmail === userEmail).
     if (!callerEmail || callerEmail.toLowerCase().trim() !== userEmail.toLowerCase().trim()) {
       return c.json({ error: 'Forbidden' }, 403);
+    }
+
+    if (!(await profile.users.get(supabase, userEmail))) {
+      return c.json({ error: 'User not found' }, 404);
     }
 
     // 🔒 Лимит размера файла — защита от заливки гигантских файлов (стоимость storage/OCR).
@@ -4417,8 +4425,7 @@ app.post("/make-server-4e36197a/documents/upload", async (c) => {
       const photoUrl = signedUrlData?.signedUrl || null;
       
       // Сохраняем документ со статусом "rejected"
-      const docKey = `ovora:document:${userEmail}:${documentId}`;
-      await kv.set(docKey, {
+      await profile.documents.save(supabase, {
         id: documentId,
         userEmail,
         type: documentType,
@@ -4459,9 +4466,8 @@ app.post("/make-server-4e36197a/documents/upload", async (c) => {
     );
     console.log(`[documents/upload] Auto-verification result:`, verification);
 
-    // 5. Save document metadata to KV
+    // 5. Save document metadata (номер документа profileStore шифрует сам)
     const now = new Date().toISOString();
-    const docKey = `ovora:document:${userEmail}:${documentId}`;
     
     const document = {
       id: documentId,
@@ -4481,8 +4487,8 @@ app.post("/make-server-4e36197a/documents/upload", async (c) => {
       updatedAt: now,
     };
 
-    await kv.set(docKey, document);
-    console.log(`[documents/upload] Document saved to KV: ${docKey} with status: ${verification.status}`);
+    await profile.documents.save(supabase, document);
+    console.log(`[documents/upload] Document ${documentType} saved with status: ${verification.status}`);
 
     // 6. Если паспорт одобрен - обновить профиль пользователя
     let updatedUser = null;
@@ -4490,8 +4496,7 @@ app.post("/make-server-4e36197a/documents/upload", async (c) => {
     
     if (verification.status === 'verified' && verification.needsProfileUpdate && finalFullName) {
       try {
-        const userKey = `ovora:user:email:${userEmail.toLowerCase().trim()}`;
-        const existingUser: any = await kv.get(userKey) || {};
+        const existingUser: any = await profile.users.get(supabase, userEmail) || {};
         
         
         // Парсим ФИО (формат: "Фамилия Имя Отчество")
@@ -4520,7 +4525,7 @@ app.post("/make-server-4e36197a/documents/upload", async (c) => {
           updatedAt: now,
         };
         
-        await kv.set(userKey, updatedUser);
+        updatedUser = await profile.users.patch(supabase, userEmail, updatedUser);
         console.log(`[documents/upload] Profile updated from passport data`);
       } catch (profileErr) {
         console.log('[documents/upload] Error updating profile from passport:', profileErr);
@@ -4623,7 +4628,7 @@ app.get("/make-server-4e36197a/documents/user/:email", async (c) => {
     }
     console.log(`[documents/user] Fetching documents for: ${email}`);
     
-    const docs: any[] = await kv.getByPrefix(`ovora:document:${email}:`);
+    const docs: any[] = await profile.documents.listByUser(supabase, email);
     console.log(`[documents/user] Found ${docs.length} documents`);
     
     // Create signed URLs for all documents with photos
@@ -4667,8 +4672,7 @@ app.delete("/make-server-4e36197a/documents/:documentId", async (c) => {
       return c.json({ error: 'Forbidden' }, 403);
     }
 
-    const docKey = `ovora:document:${userEmail}:${documentId}`;
-    const existing: any = await kv.get(docKey);
+    const existing: any = await profile.documents.get(supabase, userEmail, documentId);
     
     if (!existing) {
       return c.json({ error: "Document not found" }, 404);
@@ -4680,9 +4684,8 @@ app.delete("/make-server-4e36197a/documents/:documentId", async (c) => {
       console.log(`[documents/delete] File deleted: ${existing.photoPath}`);
     }
 
-    // Delete from KV
-    await kv.del(docKey);
-    console.log(`[documents/delete] Document deleted: ${docKey}`);
+    await profile.documents.remove(supabase, userEmail, documentId);
+    console.log(`[documents/delete] Document ${documentId} deleted`);
 
     return c.json({ success: true });
   } catch (err) {
@@ -4752,7 +4755,7 @@ app.post("/make-server-4e36197a/test-ocr", requireAdminChecked, async (c) => {
 app.get("/make-server-4e36197a/stats", async (c) => {
   try {
     const [users, trips, reviews]: any[] = await Promise.all([
-      kv.getByPrefix("ovora:user:email:"),
+      profile.users.listAll(supabase),
       store.trips.listAll(supabase),
       kv.getByPrefix("ovora:review:"),
     ]);
@@ -4782,7 +4785,7 @@ app.get("/make-server-4e36197a/admin/stats", async (c) => {
     const [trips, offers, users, reviews]: any[] = await Promise.all([
       store.trips.listAll(supabase),
       store.offers.listAll(supabase),
-      kv.getByPrefix("ovora:user:email:"),
+      profile.users.listAll(supabase),
       kv.getByPrefix("ovora:review:"),
     ]);
     // Для центра уведомлений в шапке админки: новые pending-заявки и отзывы за последние 24ч.
@@ -4817,7 +4820,7 @@ function paginate<T>(c: any, items: T[]): { items: T[]; total: number; limit: nu
 
 app.get("/make-server-4e36197a/admin/users", async (c) => {
   try {
-    const users: any[] = await kv.getByPrefix("ovora:user:email:");
+    const users: any[] = await profile.users.listAll(supabase);
     const { items, total, limit, offset } = paginate(c, users.filter(u => u));
     return c.json({ users: items, total, limit, offset });
   } catch (err) {
@@ -4913,7 +4916,7 @@ app.get("/make-server-4e36197a/admin/search", async (c) => {
     }
 
     const [users, trips, offers, cargos, reviews]: any[] = await Promise.all([
-      kv.getByPrefix("ovora:user:email:"),
+      profile.users.listAll(supabase),
       store.trips.listAll(supabase),
       store.offers.listAll(supabase),
       store.cargos.listAll(supabase),
@@ -4964,7 +4967,7 @@ app.delete("/make-server-4e36197a/admin/cargos/:id", async (c) => {
     // Груз и его отклики — одной транзакцией; водитель принятого отклика получает уведомление.
     await cancelCargoWithOffers(id, existing);
     if (existing.senderEmail) {
-      const sender: any = await kv.get(`ovora:user:email:${existing.senderEmail.toLowerCase().trim()}`);
+      const sender: any = await profile.users.get(supabase, existing.senderEmail.toLowerCase().trim());
       if (sender && !(await throttleEmail(existing.senderEmail, `cargo-removed-${id}`, 3_600_000))) {
         const tpl = adminActionTemplate({
           firstName: sender.firstName || 'Пользователь',
@@ -5041,7 +5044,7 @@ app.put("/make-server-4e36197a/admin/offers/:tripId/:offerId/status", async (c) 
     const updated: any = await store.offers.get(supabase, tripId, offerId);
 
     for (const email of [existing.senderEmail, existing.driverEmail].filter(Boolean)) {
-      const user: any = await kv.get(`ovora:user:email:${email.toLowerCase().trim()}`);
+      const user: any = await profile.users.get(supabase, email.toLowerCase().trim());
       if (user && !(await throttleEmail(email, `offer-admin-${status}-${tripId}-${offerId}`, 3_600_000))) {
         const tpl = adminActionTemplate({
           firstName: user.firstName || 'Пользователь',
@@ -5076,13 +5079,13 @@ app.delete("/make-server-4e36197a/admin/reviews/:reviewId", async (c) => {
 
     // LOG-14: Recalculate rating after admin review deletion
     if (existing.targetEmail) {
-      await recalculateRating(kv, existing.targetEmail, setDriverTripsRating).catch((e: any) =>
+      await recalculateRating(kv, existing.targetEmail, applyUserRating).catch((e: any) =>
         console.warn('[DELETE /admin/reviews] Failed to recalculate rating:', e)
       );
     }
 
     if (existing.authorEmail) {
-      const author: any = await kv.get(`ovora:user:email:${existing.authorEmail.toLowerCase().trim()}`);
+      const author: any = await profile.users.get(supabase, existing.authorEmail.toLowerCase().trim());
       if (author && !(await throttleEmail(existing.authorEmail, `review-removed-${reviewId}`, 3_600_000))) {
         const tpl = adminActionTemplate({
           firstName: author.firstName || 'Пользователь',
@@ -5107,22 +5110,12 @@ app.delete("/make-server-4e36197a/admin/reviews/:reviewId", async (c) => {
 app.get("/make-server-4e36197a/admin/documents", async (c) => {
   try {
     const usersByEmail = new Map<string, any>();
-    for (const u of (await kv.getByPrefix("ovora:user:email:") as any[])) {
-      if (u?.email) usersByEmail.set(u.email, u);
-    }
+    for (const u of await profile.users.listAll(supabase)) usersByEmail.set(u.email, u);
 
-    // ✅ Один запрос вместо N+1 по пользователям — kv.getByPrefix() отдаёт только
-    // value (без key), поэтому email владельца достаём из ключа напрямую через raw select.
-    const { data: rows, error } = await supabase
-      .from("kv_store_4e36197a")
-      .select("key, value")
-      .like("key", "ovora:document:%");
-    if (error) throw new Error(error.message);
-
+    // Номер документа админ видит расшифрованным (listAllForAdmin), ссылка на скан — на час.
     const allDocs = await Promise.all(
-      (rows || []).filter(r => r.value).map(async (r) => {
-        const email = r.key.split(":")[2] || "";
-        const doc = r.value;
+      (await profile.documents.listAllForAdmin(supabase)).map(async (doc: any) => {
+        const email = doc.userEmail;
         const user = usersByEmail.get(email);
         let photoUrl = null;
         if (doc.photoPath) {
@@ -5155,16 +5148,16 @@ app.put("/make-server-4e36197a/admin/documents/:documentId/status", async (c) =>
     const documentId = c.req.param("documentId");
     const { status, userEmail, notes } = await c.req.json();
     if (!status || !userEmail) return c.json({ error: "status and userEmail required" }, 400);
-    const docKey = `ovora:document:${userEmail}:${documentId}`;
-    const existing: any = await kv.get(docKey);
-    if (!existing) return c.json({ error: "Document not found" }, 404);
-    const updated = { ...existing, status, ...(notes ? { adminNotes: notes } : {}), reviewedAt: new Date().toISOString() };
-    await kv.set(docKey, updated);
-    const userKey = `ovora:user:email:${userEmail.toLowerCase().trim()}`;
-    const user: any = await kv.get(userKey);
-    if (status === "verified" || status === "approved") {
-      if (user) await kv.set(userKey, { ...user, isVerified: true, documentsVerified: true, updatedAt: new Date().toISOString() });
+    if (!(DOCUMENT_STATUSES as readonly string[]).includes(status)) {
+      return c.json({ error: `status must be one of: ${DOCUMENT_STATUSES.join(', ')}` }, 400);
     }
+    const existing: any = await profile.documents.setStatus(supabase, userEmail, documentId, status,
+      { ...(notes ? { adminNotes: notes } : {}), reviewedAt: new Date().toISOString() });
+    if (!existing) return c.json({ error: "Document not found" }, 404);
+    const updated = existing;
+    const user: any = status === "verified" || status === "approved"
+      ? await profile.users.patch(supabase, userEmail, { isVerified: true, documentsVerified: true })
+      : await profile.users.get(supabase, userEmail);
     if ((status === "verified" || status === "approved" || status === "rejected") && user) {
       if (!(await throttleEmail(userEmail, `document-${status}-${documentId}`, 3_600_000))) {
         const tpl = documentStatusTemplate({
@@ -5195,8 +5188,7 @@ app.delete("/make-server-4e36197a/admin/documents/:documentId", async (c) => {
     const { userEmail } = await c.req.json();
     if (!userEmail) return c.json({ error: "userEmail required" }, 400);
 
-    const docKey = `ovora:document:${userEmail}:${documentId}`;
-    const existing: any = await kv.get(docKey);
+    const existing: any = await profile.documents.get(supabase, userEmail, documentId);
     if (!existing) return c.json({ error: "Document not found" }, 404);
 
     // Скан содержит персональные данные — удаляем вместе с записью.
@@ -5207,7 +5199,7 @@ app.delete("/make-server-4e36197a/admin/documents/:documentId", async (c) => {
         console.warn('[admin/documents] Не удалось удалить файл скана:', rmErr);
       }
     }
-    await kv.del(docKey);
+    await profile.documents.remove(supabase, userEmail, documentId);
 
     await CargoAuditLog.record({ action: 'document.admin_reset', actorEmail: adminActor(c), targetId: documentId, targetType: 'document', details: { userEmail } });
     console.log(`[admin/documents] Сброшен документ ${documentId} у ${userEmail}`);
@@ -5247,7 +5239,7 @@ app.put("/make-server-4e36197a/admin/settings", async (c) => {
 // эта кнопка догоняет их одним проходом. Только главный админ.
 app.post("/make-server-4e36197a/admin/auth/sync-identities", requireRole(['super-admin']), async (c) => {
   try {
-    const users: any[] = await kv.getByPrefix('ovora:user:email:');
+    const users: any[] = await profile.users.listAll(supabase);
     let synced = 0, skipped = 0;
 
     for (const u of users) {
@@ -5291,11 +5283,10 @@ app.put("/make-server-4e36197a/admin/users/:email/status", async (c) => {
     const email = decodeURIComponent(c.req.param("email"));
     const { status } = await c.req.json();
     if (status !== 'active' && status !== 'blocked') return c.json({ error: "status must be active or blocked" }, 400);
-    const key = `ovora:user:email:${email.toLowerCase().trim()}`;
-    const existing: any = await kv.get(key);
+    const existing: any = await profile.users.get(supabase, email);
     if (!existing) return c.json({ error: "User not found" }, 404);
-    const updated = { ...existing, status, updatedAt: new Date().toISOString() };
-    await kv.set(key, updated);
+    const updated = await profile.users.patch(supabase, email, { status });
+    if (!updated) return c.json({ error: "User not found" }, 404);
     // ROOT-6: revoke user JWT tokens when blocking — forces existing tokens to be rejected
     if (status === "blocked" && status !== existing.status) {
       await revokeUserTokens(email);
@@ -5323,8 +5314,7 @@ app.put("/make-server-4e36197a/admin/users/:email/status", async (c) => {
 app.delete("/make-server-4e36197a/admin/users/:email", async (c) => {
   try {
     const email = decodeURIComponent(c.req.param("email"));
-    const key = `ovora:user:email:${email.toLowerCase().trim()}`;
-    const existing: any = await kv.get(key);
+    const existing: any = await profile.users.get(supabase, email);
     if (!existing) return c.json({ error: "User not found" }, 404);
 
     const cleanPhone = String(existing.phone || "").replace(/\D/g, "");
@@ -5336,9 +5326,8 @@ app.delete("/make-server-4e36197a/admin/users/:email", async (c) => {
     const cascade = await cascadeDeletedUser(normalizedEmail);
     console.log(`[DELETE /admin/users] cascade for ${normalizedEmail}: ${JSON.stringify(cascade)}`);
 
-    await kv.del(key);
+    await profile.users.remove(supabase, normalizedEmail);
     if (cleanPhone.length >= 7) {
-      await kv.del(`ovora:user:phone:${cleanPhone}`);
       await Blacklist.add(cleanPhone, {
         reason: "Удалён администратором",
         blockedBy: "admin",
@@ -5386,7 +5375,7 @@ app.get("/make-server-4e36197a/admin/stats/full", async (c) => {
     const [trips, offers, users, reviews]: any[] = await Promise.all([
       store.trips.listAll(supabase),
       store.offers.listAll(supabase),
-      kv.getByPrefix("ovora:user:email:"),
+      profile.users.listAll(supabase),
       kv.getByPrefix("ovora:review:"),
     ]);
     const validTrips = trips.filter((t: any) => t && !t.deletedAt);
@@ -5873,7 +5862,7 @@ app.post(
     if (!NOTIFICATION_TYPES.has(type)) {
       return c.json({ error: "Invalid notification type" }, 400);
     }
-    const recipient = await kv.get(`ovora:user:email:${String(userEmail).toLowerCase().trim()}`);
+    const recipient = await profile.users.get(supabase, String(userEmail).toLowerCase().trim());
     if (!recipient) {
       return c.json({ error: "User not found" }, 404);
     }
@@ -5991,8 +5980,7 @@ app.delete("/make-server-4e36197a/notifications/:email", async (c) => {
 app.get("/make-server-4e36197a/users/:email", async (c) => {
   try {
     const email = decodeURIComponent(c.req.param("email"));
-    const userKey = `ovora:user:email:${email.toLowerCase().trim()}`;
-    const user = await kv.get(userKey);
+    const user = await profile.users.get(supabase, email);
     
     if (!user) {
       return c.json({ error: "User not found" }, 404);
@@ -6027,8 +6015,7 @@ app.put("/make-server-4e36197a/users/:email", async (c) => {
       return c.json({ error: "Forbidden: you can only update your own profile" }, 403);
     }
 
-    const userKey = `ovora:user:email:${email.toLowerCase().trim()}`;
-    const existingUser: any = await kv.get(userKey);
+    const existingUser: any = await profile.users.get(supabase, email);
 
     if (!existingUser) {
       console.log(`[users/update] User not found: ${email}`);
@@ -6041,14 +6028,8 @@ app.put("/make-server-4e36197a/users/:email", async (c) => {
       if (!USER_PROTECTED_FIELDS.has(k)) updates[k] = v;
     }
 
-    const updatedUser = {
-      ...existingUser,
-      ...updates,
-      email: existingUser.email,
-      updatedAt: new Date().toISOString(),
-    };
-
-    await kv.set(userKey, updatedUser);
+    const updatedUser: any = await profile.users.patch(supabase, email, updates);
+    if (!updatedUser) return c.json({ error: "User not found" }, 404);
 
     const { codeHash: _ch, passportNumber: _pn, passportData: _pd, ...safeUser } = updatedUser;
     return c.json({ success: true, user: safeUser });
@@ -6104,11 +6085,7 @@ app.post("/make-server-4e36197a/users/:email/avatar", async (c) => {
     console.log(`[avatar/upload] Uploaded avatar: ${avatarUrl}`);
 
     // Update user record with new avatarUrl
-    const userKey = `ovora:user:email:${email}`;
-    const existingUser: any = await kv.get(userKey);
-    if (existingUser) {
-      const updatedUser = { ...existingUser, avatarUrl, updatedAt: new Date().toISOString() };
-      await kv.set(userKey, updatedUser);
+    if (await profile.users.patch(supabase, email, { avatarUrl })) {
       console.log(`[avatar/upload] User record updated with avatarUrl`);
     }
 
@@ -6123,6 +6100,7 @@ app.post("/make-server-4e36197a/users/:email/avatar", async (c) => {
 //  OTP AUTHENTICATION — KV store + Gmail SMTP (email) / dev mode (phone)
 // ══════════════════════════════════════════════════════════════════════════════
 
+usePermCodeUserLookup((email) => profile.users.get(supabase, email));
 app.post("/make-server-4e36197a/auth/send-otp", handleSendOtp);
 app.post("/make-server-4e36197a/auth/verify-otp", handleVerifyOtp);
 

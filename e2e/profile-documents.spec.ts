@@ -31,15 +31,17 @@ test.describe.serial('профиль и документы', () => {
   test('владелец меняет профиль, но не роль, статус и проверку', async ({ request }) => {
     const res = await request.put(`${API}/users/${encodeURIComponent(owner)}`, {
       headers: as(ownerToken),
-      data: { phone: PHONE, firstName: 'Профиль', role: 'sender', status: 'blocked', isVerified: true },
+      data: { phone: PHONE, firstName: 'Профиль', role: 'sender', status: 'blocked', isVerified: true, rating: 5, documentsVerified: true },
     });
     expect(res.status(), await res.text()).toBe(200);
     const user = (await res.json()).user;
     expect(user.phone).toBe(PHONE);
     expect(user.firstName).toBe('Профиль');
     expect(user.role).toBe('driver');
-    expect(user.status).toBeUndefined();
-    expect(user.isVerified).toBeUndefined();
+    expect(user.status).not.toBe('blocked');
+    expect(user.isVerified).not.toBe(true);
+    expect(user.rating).not.toBe(5);
+    expect(user.documentsVerified).not.toBe(true);
   });
 
   test('чужой профиль нельзя изменить', async ({ request }) => {
@@ -69,10 +71,44 @@ test.describe.serial('профиль и документы', () => {
     expect(res.status()).toBe(403);
   });
 
+  test('загруженный документ без распознанного ФИО уходит на ручную проверку', async ({ request }) => {
+    // 1×1 PNG: распознать нечего — документ не может стать «проверенным» сам.
+    const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==', 'base64');
+    const headers = as(ownerToken);
+    delete headers['Content-Type'];
+    const res = await request.post(`${API}/documents/upload`, {
+      headers,
+      multipart: {
+        file: { name: 'passport.png', mimeType: 'image/png', buffer: png },
+        userEmail: owner, documentId: 'passport', documentType: 'passport', title: 'Паспорт', subtitle: 'e2e',
+      },
+    });
+    expect(res.status(), await res.text()).toBe(200);
+    const doc = (await res.json()).document;
+    expect(doc.status).toBe('pending');
+    expect(doc.userEmail).toBe(owner);
+  });
+
+  test('тип документа — только из списка', async ({ request }) => {
+    const headers = as(ownerToken);
+    delete headers['Content-Type'];
+    const res = await request.post(`${API}/documents/upload`, {
+      headers,
+      multipart: {
+        file: { name: 'x.png', mimeType: 'image/png', buffer: Buffer.from('x') },
+        userEmail: owner, documentId: 'x', documentType: '../../etc', title: 'x', subtitle: 'x',
+      },
+    });
+    expect(res.status()).toBe(400);
+  });
+
   test('свои документы читаются', async ({ request }) => {
     const res = await request.get(`${API}/documents/user/${encodeURIComponent(owner)}`, { headers: as(ownerToken) });
     expect(res.status(), await res.text()).toBe(200);
-    expect(Array.isArray((await res.json()).documents)).toBe(true);
+    const docs = (await res.json()).documents;
+    const passport = docs.find((d: any) => d.id === 'passport');
+    expect(passport?.status).toBe('pending');
+    expect(passport?.documentNumber).toBeUndefined();
   });
 
   test('владелец не может сам поставить документу «проверен»', async ({ request }) => {
