@@ -17,6 +17,7 @@ import { rateLimitMiddleware, RL, aviaRL } from "./rateLimit.tsx";
 import { requestLimitPolicy, ADMIN_AUTH_FAILURES, type Identity } from "./requestLimits.tsx";
 import { verifiedAviaPhone } from "./aviaAuth.tsx";
 import { isValidUnsubscribeSignature } from "./unsubscribeLink.tsx";
+import { announceIfNew, recordServerError, errorKind } from "./alerts.tsx";
 import { calculateAverageRating, recalculateRating } from "./rating.tsx";
 import * as kv from "./kv_store.tsx";
 import * as capacity from "./capacity.tsx";
@@ -38,6 +39,27 @@ import {
 
 const app = new Hono();
 app.use('*', logger(console.log));
+
+// ── Оповещения об ошибках в Telegram (alerts.tsx) ────────────────────────────
+// Стоит первым: видит итоговый статус любого ответа, в том числе после исключения.
+const ALERT_SITE = (Deno.env.get('SUPABASE_URL') || '').includes('mkbcjxnoeevtkzaqcpsh') ? 'боевой' : 'тестовый';
+let alertsAnnounced = false;
+app.use('*', async (c, next) => {
+  await next();
+  const token = (Deno.env.get('TELEGRAM_BOT_TOKEN') || '').trim();
+  if (!token) return;
+  try {
+    if (!alertsAnnounced) {
+      alertsAnnounced = true;
+      await announceIfNew(kv, fetch, token, ALERT_SITE);
+    }
+    if (c.res.status >= 500) {
+      await recordServerError(kv, fetch, token, ALERT_SITE, errorKind(c.req.method, c.req.path, c.res.status));
+    }
+  } catch (err) {
+    console.warn('[alerts] не удалось записать или отправить оповещение:', err);
+  }
+});
 
 // ── Chat pair-id helper (mirrors src/app/api/chatUtils.ts generatePairChatId) ──
 function generateEmailHash(email: string): string {
