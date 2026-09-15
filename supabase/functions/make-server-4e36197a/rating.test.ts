@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { calculateAverageRating } from './rating.tsx';
+import { calculateAverageRating, recalculateRating } from './rating.tsx';
 
 describe('calculateAverageRating', () => {
   it('возвращает 0 для пустого списка отзывов', () => {
@@ -20,5 +20,19 @@ describe('calculateAverageRating', () => {
 
   it('корректно округляет границу .x5 вверх', () => {
     expect(calculateAverageRating([4, 5])).toBe(4.5);
+  });
+});
+
+describe('recalculateRating', () => {
+  it('средняя оценка из полученных отзывов уходит в профиль и поездки', async () => {
+    const applied: Array<[string, number]> = [];
+    await recalculateRating(async () => [5, 4, 4], 'd@x.com', async (email, rating) => { applied.push([email, rating]); });
+    expect(applied).toEqual([['d@x.com', 4.3]]);
+  });
+
+  it('без отзывов рейтинг 0 (после удаления последнего отзыва)', async () => {
+    const applied: number[] = [];
+    await recalculateRating(async () => [], 'd@x.com', async (_e, rating) => { applied.push(rating); });
+    expect(applied).toEqual([0]);
   });
 });

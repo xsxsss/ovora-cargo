@@ -25,6 +25,7 @@ import * as capacity from "./capacity.tsx";
 import * as store from "./bookingStore.tsx";
 import * as profile from "./profileStore.tsx";
 import * as chatDb from "./chatTables.tsx";
+import * as feed from "./feedTables.tsx";
 import { messagePreview } from "./chatRows.tsx";
 import { DOCUMENT_STATUSES, DOCUMENT_TYPES } from "./profileRows.tsx";
 import { decideAutoVerification } from "./docVerification.tsx";
@@ -95,7 +96,7 @@ const ACCEPT_ERRORS: Record<string, [number, string]> = {
 
 async function notifyCancellation(to: string, title: string, description: string): Promise<void> {
   const id = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-  await kv.set(`ovora:notification:${to}:${id}`, {
+  await feed.notifications.add(supabase, to, {
     id, userEmail: to,
     type: 'trip_cancelled', iconName: 'XCircle', iconBg: 'bg-red-500/10 text-red-500',
     title, description, isUnread: true, createdAt: new Date().toISOString(),
@@ -117,6 +118,11 @@ async function notifyTripCancelled(cancelled: CancelledOffer[], trip: any, reaso
 }
 
 /** Рейтинг водителя в карточках его поездок (карточка — поле data, места не трогаются). */
+/** Оценки человека из полученных отзывов — для пересчёта рейтинга (rating.tsx). */
+async function loadUserRatings(email: string): Promise<number[]> {
+  return (await feed.reviews.listByTarget(supabase, email)).map(r => Number(r.rating));
+}
+
 async function applyUserRating(driverEmail: string, rating: number): Promise<void> {
   await profile.users.patch(supabase, driverEmail, { rating });
   for (const trip of await store.trips.listByDriver(supabase, driverEmail)) {
@@ -187,10 +193,7 @@ async function cascadeDeletedUser(email: string): Promise<Record<string, number>
   }
 
   // 5. Личные записи: уведомления, push-подписки, документы
-  const notifs: any[] = await kv.getByPrefix(`ovora:notification:${email}:`);
-  for (const n of notifs) {
-    if (n?.id) { await kv.del(`ovora:notification:${email}:${n.id}`).catch(() => {}); counts.notifications++; }
-  }
+  counts.notifications = await feed.notifications.removeAll(supabase, email);
   const pushSubs: any[] = await kv.getByPrefix(`ovora:push:sub:${email}:`);
   for (const sub of pushSubs) {
     if (!sub?.endpoint) continue;
@@ -1189,7 +1192,7 @@ function cleanAddress(address: string): string {
 // ─────────────────────────────────────────────────────────────────────────────
 // АВТОУДАЛЕНИЕ АРХИВА ПОЕЗДОК — через 30 дней после завершения поездки
 // (даёт водителю/отправителю месяц на обращение в поддержку при споре).
-// Отзывы (ovora:review:*) НЕ удаляются — они хранят свою копию данных
+// Отзывы (таблица reviews) НЕ удаляются — они хранят свою копию данных
 // (tripRoute и т.п.) и должны переживать поездку навсегда.
 // ─────────────────────────────────────────────────────────────────────────────
 const TRIP_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
@@ -1781,7 +1784,7 @@ app.post("/make-server-4e36197a/offers",
       if (offer.driverEmail && offer.senderName) {
         const tripRoute = trip ? `${trip.from} → ${trip.to}` : 'вашу поездку';
         const notificationId = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-        await kv.set(`ovora:notification:${offer.driverEmail}:${notificationId}`, {
+        await feed.notifications.add(supabase, offer.driverEmail, {
           id: notificationId,
           userEmail: offer.driverEmail,
           type: 'offer',
@@ -2041,7 +2044,7 @@ app.put("/make-server-4e36197a/offers/:tripId/:offerId", async (c) => {
         const driverName = existing.driverName || trip?.driverName || 'Водитель';
         const isAccepted = newStatus === 'accepted';
         const notifId = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-        await kv.set(`ovora:notification:${existing.senderEmail}:${notifId}`, {
+        await feed.notifications.add(supabase, existing.senderEmail, {
           id: notifId,
           userEmail: existing.senderEmail,
           type: isAccepted ? 'offer_accepted' : 'offer_rejected',
@@ -2109,7 +2112,7 @@ app.put("/make-server-4e36197a/offers/:tripId/:offerId", async (c) => {
 
 // ══════════════════════��═══════════════════════════════════════════════════════
 //  REVIEWS ROUTES
-//  KV: ovora:review:{reviewId} → review object
+//  Таблица reviews (feedTables.tsx)
 // ══════════════════════════════════════════════════════════════════════════════
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -2147,7 +2150,7 @@ app.post("/make-server-4e36197a/cargo-offers", async (c) => {
     if (cargo.senderEmail) {
       try {
         const notifId = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-        await kv.set(`ovora:notification:${cargo.senderEmail}:${notifId}`, {
+        await feed.notifications.add(supabase, cargo.senderEmail, {
           id: notifId, userEmail: cargo.senderEmail, type: 'cargo_offer', iconName: 'Truck',
           iconBg: 'bg-blue-500/10 text-blue-500', title: 'Новый отклик на груз',
           description: `${driverName} откликнулся на ваш груз ${cargo.from} → ${cargo.to}`,
@@ -2263,7 +2266,7 @@ app.put("/make-server-4e36197a/cargo-offers/:cargoId/:offerId", async (c) => {
         const cargoRoute = cargo ? `${cargo.from} → ${cargo.to}` : 'груз';
         const isAccepted = updated.status === 'accepted';
         const notifId = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-        await kv.set(`ovora:notification:${existing.driverEmail}:${notifId}`, {
+        await feed.notifications.add(supabase, existing.driverEmail, {
           id: notifId, userEmail: existing.driverEmail,
           type: isAccepted ? 'cargo_offer_accepted' : 'cargo_offer_rejected',
           iconName: isAccepted ? 'CheckCircle2' : 'XCircle',
@@ -2345,22 +2348,6 @@ app.post("/make-server-4e36197a/reviews",
       return c.json({ error: 'Вы можете оценивать только своих попутчиков по завершённым поездкам' }, 403);
     }
 
-    // ✅ FIX #3: Защита от дублирования отзывов (authorEmail + targetEmail + tripId)
-    const authorIndex: any[] = await kv.getByPrefix(`ovora:userreviews:author:${authorEmail}:`);
-    if (authorIndex.length > 0) {
-      const existingKeys = authorIndex.filter(e => e?.reviewId).map(e => `ovora:review:${e.reviewId}`);
-      if (existingKeys.length > 0) {
-        const existingReviews: any[] = await kv.mget(existingKeys);
-        const duplicate = existingReviews.find(r =>
-          r && String(r.targetEmail || '').toLowerCase().trim() === targetEmail && String(r.tripId || '') === tripId
-        );
-        if (duplicate) {
-          console.log(`[POST /reviews] Duplicate blocked: author=${authorEmail}, target=${targetEmail}, trip=${tripId}`);
-          return c.json({ error: 'Вы уже оставили отзыв на эту поездку', duplicate: true }, 409);
-        }
-      }
-    }
-
     // Оценка попадает в рейтинг — только целое 1..5 (раньше принималось любое число, 1000 поднимало средний балл).
     const rating = Number(body.rating);
     if (!Number.isInteger(rating) || rating < 1 || rating > 5) {
@@ -2384,20 +2371,17 @@ app.post("/make-server-4e36197a/reviews",
       verified: true,
       createdAt: now,
     };
-    await kv.set(`ovora:review:${reviewId}`, review);
-
-    // ✅ Вторичные индексы — быстрый поиск без full-scan
-    if (review.targetEmail) {
-      await kv.set(`ovora:userreviews:target:${review.targetEmail}:${reviewId}`, { reviewId }).catch(() => {});
-    }
-    if (review.authorEmail) {
-      await kv.set(`ovora:userreviews:author:${review.authorEmail}:${reviewId}`, { reviewId }).catch(() => {});
+    // Дубль (автор + адресат + поездка) отсекает уникальный ключ в базе — и при двух одновременных запросах.
+    const inserted = await feed.reviews.insert(supabase, review);
+    if (inserted.duplicate) {
+      console.log(`[POST /reviews] Duplicate blocked: trip=${tripId}`);
+      return c.json({ error: 'Вы уже оставили отзыв на эту поездку', duplicate: true }, 409);
     }
 
     // Снепшот рейтинга на карточках поездок водителя — иначе он замораживается
     // на момент создания поездки.
     if (review.targetEmail) {
-      await recalculateRating(kv, review.targetEmail, applyUserRating).catch((e: any) =>
+      await recalculateRating(loadUserRatings, review.targetEmail, applyUserRating).catch((e: any) =>
         console.log("[POST /reviews] Failed to refresh driverRating snapshot:", e)
       );
     }
@@ -2415,39 +2399,7 @@ app.get("/make-server-4e36197a/reviews/user/:email", async (c) => {
   try {
     const email = decodeURIComponent(c.req.param("email"));
 
-    // ✅ Используем вторичный индекс — без full-scan
-    const [targetEntries, authorEntries]: [any[], any[]] = await Promise.all([
-      kv.getByPrefix(`ovora:userreviews:target:${email}:`),
-      kv.getByPrefix(`ovora:userreviews:author:${email}:`),
-    ]);
-
-    const allEntries = [...targetEntries, ...authorEntries];
-
-    if (allEntries.length > 0) {
-      const reviewIds = [...new Set(allEntries.filter(e => e?.reviewId).map((e: any) => e.reviewId))];
-      const keys = reviewIds.map(id => `ovora:review:${id}`);
-      const fetched: any[] = await kv.mget(keys);
-      const userReviews = fetched
-        .filter(r => r != null)
-        .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-      console.log(`[GET /reviews/user] ${email}: index hit, ${userReviews.length} reviews`);
-      return c.json({ reviews: userReviews });
-    }
-
-    // Fallback: full-scan + восстановление индекса
-    console.log(`[GET /reviews/user] ${email}: index empty, falling back to full scan`);
-    const all: any[] = await kv.getByPrefix(`ovora:review:`);
-    const userReviews = all
-      .filter(r => r && (r.targetEmail === email || r.authorEmail === email))
-      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-    // Восстановление индекса
-    for (const r of userReviews) {
-      if (!r.reviewId) continue;
-      if (r.targetEmail) await kv.set(`ovora:userreviews:target:${r.targetEmail}:${r.reviewId}`, { reviewId: r.reviewId }).catch(() => {});
-      if (r.authorEmail) await kv.set(`ovora:userreviews:author:${r.authorEmail}:${r.reviewId}`, { reviewId: r.reviewId }).catch(() => {});
-    }
-    console.log(`[GET /reviews/user] ${email}: rebuilt index for ${userReviews.length} reviews`);
-    return c.json({ reviews: userReviews });
+    return c.json({ reviews: await feed.reviews.listByUser(supabase, email) });
   } catch (err) {
     console.log("Error GET /reviews/user:", err);
     return c.json({ error: 'Внутренняя ошибка сервера' }, 500);
@@ -2459,14 +2411,8 @@ app.get("/make-server-4e36197a/reviews", async (c) => {
     const minRating = Number(c.req.query("minRating") ?? "");
     const limit = Math.min(Number(c.req.query("limit") ?? "") || Infinity, 200);
 
-    const all: any[] = await kv.getByPrefix(`ovora:review:`);
-    let filtered = all.filter(r => r);
-    if (Number.isFinite(minRating)) {
-      filtered = filtered.filter(r => (r.rating ?? 0) >= minRating);
-    }
-    const sorted = filtered
-      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
-      .slice(0, Number.isFinite(limit) ? limit : undefined);
+    const sorted = await feed.reviews.listAll(supabase, Number.isFinite(minRating) ? minRating : undefined,
+      Number.isFinite(limit) ? limit : undefined);
     return c.json({ reviews: sorted });
   } catch (err) {
     console.log("Error GET /reviews:", err);
@@ -2619,7 +2565,7 @@ app.post("/make-server-4e36197a/chat/message", async (c) => {
         for (const recipientEmail of allParticipants) {
           if (recipientEmail !== senderId) {
             const notificationId = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-            await kv.set(`ovora:notification:${recipientEmail}:${notificationId}`, {
+            await feed.notifications.add(supabase, recipientEmail, {
               id: notificationId,
               userEmail: recipientEmail,
               type: 'message',
@@ -2847,7 +2793,7 @@ app.put("/make-server-4e36197a/chat/:chatId/proposal/:proposalId", async (c) => 
                 const driverUser: any = await profile.users.get(supabase, senderId);
                 const driverName = driverUser ? `${driverUser.firstName} ${driverUser.lastName}` : 'Водитель';
                 const notificationId = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-                await kv.set(`ovora:notification:${senderEmail}:${notificationId}`, {
+                await feed.notifications.add(supabase, senderEmail, {
                   id: notificationId,
                   userEmail: senderEmail,
                   type: 'offer',
@@ -2943,7 +2889,7 @@ app.put("/make-server-4e36197a/chat/:chatId/proposal/:proposalId", async (c) => 
                   isUnread: true,
                   createdAt: new Date().toISOString(),
                 };
-                await kv.set(`ovora:notification:${senderEmail}:${notif.id}`, notif);
+                await feed.notifications.add(supabase, senderEmail, notif);
                 console.log(`[reject] Notification created for ${senderEmail}`);
                 sendPushToUser(senderEmail, {
                   title: 'Оферта отклонена',
@@ -4401,7 +4347,7 @@ app.post("/make-server-4e36197a/documents/upload", async (c) => {
       
       if (verification.status === 'verified') {
         // ✅ Документ одобрен автоматически
-        await kv.set(`ovora:notification:${userEmail}:${notificationId}`, {
+        await feed.notifications.add(supabase, userEmail, {
           id: notificationId,
           userEmail: userEmail,
           type: 'document',
@@ -4423,7 +4369,7 @@ app.post("/make-server-4e36197a/documents/upload", async (c) => {
           
           if (daysLeft > 0 && daysLeft <= 30) {
             const warningId = `${Date.now() + 1}_${Math.random().toString(36).slice(2, 8)}`;
-            await kv.set(`ovora:notification:${userEmail}:${warningId}`, {
+            await feed.notifications.add(supabase, userEmail, {
               id: warningId,
               userEmail: userEmail,
               type: 'document',
@@ -4439,7 +4385,7 @@ app.post("/make-server-4e36197a/documents/upload", async (c) => {
         }
       } else if (verification.status === 'pending') {
         // На ручной проверке — не «отклонён»: раньше человек получал уведомление об отказе.
-        await kv.set(`ovora:notification:${userEmail}:${notificationId}`, {
+        await feed.notifications.add(supabase, userEmail, {
           id: notificationId,
           userEmail: userEmail,
           type: 'document',
@@ -4452,7 +4398,7 @@ app.post("/make-server-4e36197a/documents/upload", async (c) => {
         });
       } else {
         // ❌ Документ отклонен автоматически
-        await kv.set(`ovora:notification:${userEmail}:${notificationId}`, {
+        await feed.notifications.add(supabase, userEmail, {
           id: notificationId,
           userEmail: userEmail,
           type: 'document',
@@ -4628,7 +4574,7 @@ app.get("/make-server-4e36197a/stats", async (c) => {
     const [users, trips, reviews]: any[] = await Promise.all([
       profile.users.listAll(supabase),
       store.trips.listAll(supabase),
-      kv.getByPrefix("ovora:review:"),
+      feed.reviews.listAll(supabase),
     ]);
     const drivers = (users as any[]).filter((u: any) => u && u.role === 'driver').length;
     const citySet = new Set<string>();
@@ -4657,7 +4603,7 @@ app.get("/make-server-4e36197a/admin/stats", async (c) => {
       store.trips.listAll(supabase),
       store.offers.listAll(supabase),
       profile.users.listAll(supabase),
-      kv.getByPrefix("ovora:review:"),
+      feed.reviews.listAll(supabase),
     ]);
     // Для центра уведомлений в шапке админки: новые pending-заявки и отзывы за последние 24ч.
     const DAY_MS = 24 * 60 * 60 * 1000;
@@ -4721,8 +4667,8 @@ app.get("/make-server-4e36197a/admin/offers", async (c) => {
 
 app.get("/make-server-4e36197a/admin/reviews", async (c) => {
   try {
-    const reviews: any[] = await kv.getByPrefix("ovora:review:");
-    const { items, total, limit, offset } = paginate(c, reviews.filter(r => r));
+    const reviews: any[] = await feed.reviews.listAll(supabase);
+    const { items, total, limit, offset } = paginate(c, reviews);
     return c.json({ reviews: items, total, limit, offset });
   } catch (err) {
     return c.json({ error: 'Внутренняя ошибка сервера' }, 500);
@@ -4789,7 +4735,7 @@ app.get("/make-server-4e36197a/admin/search", async (c) => {
       store.trips.listAll(supabase),
       store.offers.listAll(supabase),
       store.cargos.listAll(supabase),
-      kv.getByPrefix("ovora:review:"),
+      feed.reviews.listAll(supabase),
     ]);
 
     const LIMIT = 5;
@@ -4934,21 +4880,18 @@ app.put("/make-server-4e36197a/admin/offers/:tripId/:offerId/status", async (c) 
   }
 });
 
-// ✅ Admin: удаление отзыва (модерация/спор) + чистка вторичных индексов
+// ✅ Admin: удаление отзыва (модерация/спор) с пересчётом рейтинга
 app.delete("/make-server-4e36197a/admin/reviews/:reviewId", async (c) => {
   try {
     const reviewId = c.req.param("reviewId");
-    const key = `ovora:review:${reviewId}`;
-    const existing: any = await kv.get(key);
+    const existing: any = await feed.reviews.get(supabase, reviewId);
     if (!existing) return c.json({ error: "Review not found" }, 404);
 
-    await kv.del(key);
-    if (existing.targetEmail) await kv.del(`ovora:userreviews:target:${existing.targetEmail}:${reviewId}`).catch(() => {});
-    if (existing.authorEmail) await kv.del(`ovora:userreviews:author:${existing.authorEmail}:${reviewId}`).catch(() => {});
+    await feed.reviews.remove(supabase, reviewId);
 
     // LOG-14: Recalculate rating after admin review deletion
     if (existing.targetEmail) {
-      await recalculateRating(kv, existing.targetEmail, applyUserRating).catch((e: any) =>
+      await recalculateRating(loadUserRatings, existing.targetEmail, applyUserRating).catch((e: any) =>
         console.warn('[DELETE /admin/reviews] Failed to recalculate rating:', e)
       );
     }
@@ -5245,7 +5188,7 @@ app.get("/make-server-4e36197a/admin/stats/full", async (c) => {
       store.trips.listAll(supabase),
       store.offers.listAll(supabase),
       profile.users.listAll(supabase),
-      kv.getByPrefix("ovora:review:"),
+      feed.reviews.listAll(supabase),
     ]);
     const validTrips = trips.filter((t: any) => t && !t.deletedAt);
     const activeTrips = validTrips.filter((t: any) => t.status === 'active');
@@ -5710,7 +5653,7 @@ app.post("/make-server-4e36197a/kv/del", async (c) => {
 
 // ══════════════════════════════════════════════════════════════════════════════
 //  NOTIFICATIONS ROUTES
-//  KV: ovora:notification:{userEmail}:{id} → notification object
+//  Таблица notifications (feedTables.tsx)
 // ══════════════════════════════════════════════════════════════════════════════
 
 const NOTIFICATION_TYPES = new Set(['trip', 'system', 'payment', 'info', 'auth', 'offer', 'message', 'document']);
@@ -5750,7 +5693,7 @@ app.post(
       createdAt: now,
     };
 
-    await kv.set(`ovora:notification:${userEmail}:${id}`, notification);
+    await feed.notifications.add(supabase, userEmail, notification);
     console.log(`[notifications] Created notification for ${userEmail}:`, title);
     return c.json({ success: true, notification });
   } catch (err) {
@@ -5764,11 +5707,7 @@ app.get("/make-server-4e36197a/notifications/:email", async (c) => {
   try {
     const email = decodeURIComponent(c.req.param("email"));
     if (!isActingAs(c, email)) return c.json(FORBIDDEN_NOT_YOU, 403);
-    const notifications: any[] = await kv.getByPrefix(`ovora:notification:${email}:`);
-    const sorted = notifications
-      .filter(n => n)
-      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-    return c.json({ notifications: sorted });
+    return c.json({ notifications: await feed.notifications.list(supabase, email) });
   } catch (err) {
     console.log("Error GET /notifications/:email:", err);
     return c.json({ error: 'Внутренняя ошибка сервера' }, 500);
@@ -5780,11 +5719,8 @@ app.put("/make-server-4e36197a/notifications/:email/:id/read", async (c) => {
     const email = decodeURIComponent(c.req.param("email"));
     if (!isActingAs(c, email)) return c.json(FORBIDDEN_NOT_YOU, 403);
     const id = c.req.param("id");
-    const key = `ovora:notification:${email}:${id}`;
-    const existing: any = await kv.get(key);
-    if (!existing) return c.json({ error: "Notification not found" }, 404);
-    const updated = { ...existing, isUnread: false };
-    await kv.set(key, updated);
+    const updated = await feed.notifications.markRead(supabase, email, id);
+    if (!updated) return c.json({ error: "Notification not found" }, 404);
     return c.json({ success: true, notification: updated });
   } catch (err) {
     console.log("Error PUT /notifications/:email/:id/read:", err);
@@ -5796,12 +5732,7 @@ app.put("/make-server-4e36197a/notifications/:email/read-all", async (c) => {
   try {
     const email = decodeURIComponent(c.req.param("email"));
     if (!isActingAs(c, email)) return c.json(FORBIDDEN_NOT_YOU, 403);
-    const notifications: any[] = await kv.getByPrefix(`ovora:notification:${email}:`);
-    for (const n of notifications) {
-      if (n && n.isUnread) {
-        await kv.set(`ovora:notification:${email}:${n.id}`, { ...n, isUnread: false });
-      }
-    }
+    await feed.notifications.markAllRead(supabase, email);
     return c.json({ success: true });
   } catch (err) {
     console.log("Error PUT /notifications/:email/read-all:", err);
@@ -5814,7 +5745,7 @@ app.delete("/make-server-4e36197a/notifications/:email/:id", async (c) => {
     const email = decodeURIComponent(c.req.param("email"));
     if (!isActingAs(c, email)) return c.json(FORBIDDEN_NOT_YOU, 403);
     const id = c.req.param("id");
-    await kv.del(`ovora:notification:${email}:${id}`);
+    await feed.notifications.remove(supabase, email, id);
     return c.json({ success: true });
   } catch (err) {
     console.log("Error DELETE /notifications/:email/:id:", err);
@@ -5826,13 +5757,8 @@ app.delete("/make-server-4e36197a/notifications/:email", async (c) => {
   try {
     const email = decodeURIComponent(c.req.param("email"));
     if (!isActingAs(c, email)) return c.json(FORBIDDEN_NOT_YOU, 403);
-    const notifications: any[] = await kv.getByPrefix(`ovora:notification:${email}:`);
-    for (const n of notifications) {
-      if (n && n.id) {
-        await kv.del(`ovora:notification:${email}:${n.id}`);
-      }
-    }
-    return c.json({ success: true, deleted: notifications.length });
+    const deleted = await feed.notifications.removeAll(supabase, email);
+    return c.json({ success: true, deleted });
   } catch (err) {
     console.log("Error DELETE /notifications/:email:", err);
     return c.json({ error: 'Внутренняя ошибка сервера' }, 500);
@@ -6245,7 +6171,7 @@ app.get("/make-server-4e36197a/users/:email/stats", async (c) => {
     const role = c.req.query("role") || "sender";
     console.log(`[user-stats] Computing stats for ${email}, role=${role}`);
 
-    const allReviews: any[] = await kv.getByPrefix("ovora:review:");
+    const allReviews: any[] = await feed.reviews.listByTarget(supabase, email);
 
     let tripCount = 0;
     if (role === "driver") {
