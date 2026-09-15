@@ -18,6 +18,7 @@ import { requestLimitPolicy, ADMIN_AUTH_FAILURES, type Identity } from "./reques
 import { verifiedAviaPhone } from "./aviaAuth.tsx";
 import { isValidUnsubscribeSignature } from "./unsubscribeLink.tsx";
 import { announceIfNew, recordServerError, errorKind } from "./alerts.tsx";
+import { isE2eLoginEnabled, isE2eEmail } from "./e2eLogin.tsx";
 import { calculateAverageRating, recalculateRating } from "./rating.tsx";
 import * as kv from "./kv_store.tsx";
 import * as capacity from "./capacity.tsx";
@@ -757,6 +758,26 @@ app.post("/make-server-4e36197a/email/unsubscribe", async (c) => {
   await setUnsubscribed(email, true);
   console.log(`[Email] Unsubscribed via signed link: ${email}`);
   return c.json({ success: true });
+});
+
+// ── Вход для сквозных тестов (только тестовая площадка, см. e2eLogin.tsx) ──────
+app.post("/make-server-4e36197a/e2e/login", async (c) => {
+  if (!isE2eLoginEnabled(Deno.env.get("SUPABASE_URL") || "", Deno.env.get("E2E_LOGIN_ENABLED"))) {
+    return c.json({ error: "Not found" }, 404);
+  }
+  const body: any = await c.req.json().catch(() => ({}));
+  const email = String(body?.email || "");
+  const role = body?.role === "driver" ? "driver" : "sender";
+  if (!isE2eEmail(email)) return c.json({ error: "Only e2e+<name>@ovora.test" }, 400);
+
+  const key = `ovora:user:email:${email}`;
+  if (!(await kv.get(key))) {
+    const now = new Date().toISOString();
+    await kv.set(key, { email, role, firstName: "E2E", lastName: role, phone: "", createdAt: now, updatedAt: now });
+  }
+  const token = await signUserToken(email);
+  if (!token) return c.json({ error: "USER_JWT_SECRET not configured" }, 500);
+  return c.json({ token, email, role });
 });
 
 // ── Health ────────────────────────────────────────────────────────────────────
