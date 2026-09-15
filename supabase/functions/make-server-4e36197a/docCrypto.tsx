@@ -50,9 +50,3 @@ export async function decryptField(stored: string | null | undefined, secret: st
   }
 }
 
-/** Для владельца документа: видны только последние 4 символа. */
-export function maskDocumentNumber(number: string | null): string | null {
-  if (!number) return null;
-  const clean = number.replace(/\s+/g, '');
-  return clean.length <= 4 ? '••••' : '••••' + clean.slice(-4);
-}

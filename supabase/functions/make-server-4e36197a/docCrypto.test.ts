@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { encryptField, decryptField, maskDocumentNumber } from './docCrypto.tsx';
+import { encryptField, decryptField } from './docCrypto.tsx';
 
 const KEY = 'test-secret-not-real-0123456789abcdef'; // pragma: allowlist secret
 
@@ -29,11 +29,5 @@ describe('шифрование номера документа', () => {
     expect(await decryptField('v1:%%%', KEY)).toBeNull();
     expect(await decryptField('4509 123456', KEY)).toBeNull();
     expect(await decryptField(enc, undefined)).toBeNull();
-  });
-
-  it('владельцу — только последние 4 символа', () => {
-    expect(maskDocumentNumber('4509 123456')).toBe('••••3456');
-    expect(maskDocumentNumber('123')).toBe('••••');
-    expect(maskDocumentNumber(null)).toBeNull();
   });
 });
