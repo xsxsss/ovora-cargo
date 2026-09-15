@@ -42,6 +42,15 @@ Cloudflare собирает сам на push в `main` (`npm run build` → `npx
 Pages для коммерческих сервисов, выключить после переезда пользователей. Новый адрес сайта — добавлять в
 `ALLOWED_ORIGINS` (`index.ts`), в `public/_headers` и в настройки счётчика Метрики.
 
+**Тестовая площадка (staging):** `git push origin HEAD:staging` → сервер уходит в тестовый проект Supabase
+`xrtqquuwlnnihphszyns`, сайт — на `staging-ovora-cargo.saburov.workers.dev` с плашкой «ТЕСТОВАЯ ВЕРСИЯ».
+База выбирается по адресу страницы (`utils/supabase/info.ts`): версии веток и localhost — тестовая, остальное —
+боевая. Порядок выпуска: staging → проверить → main. Секреты тестового проекта задаёт владелец отдельно,
+значения боевых туда не копировать.
+
+**Ссылка отписки от писем** подписана (`unsubscribeLink.tsx`, секрет `USER_JWT_SECRET`) и ведёт на страницу
+сайта `/unsubscribe`. HTML из edge-функции не показывать: Supabase отдаёт его как `text/plain`.
+
 **Деплой:**
 ```bash
 git push origin HEAD:main    # пуш → Cloudflare и GitHub Pages собирают сайт, бэкенд уходит в Supabase
