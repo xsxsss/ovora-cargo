@@ -607,64 +607,45 @@ const RADIO_VOICE_BUCKET = 'make-4e36197a-radio-voice';
 // ══════════════════════════════════════════════════════════════════════════════
 
 let vapidPublicKey = '';
-let vapidPrivateKey = '';
 let vapidReady = false;
+let vapidLoading: Promise<boolean> | null = null;
 
-async function initVapid(attempt = 1) {
-  const MAX_ATTEMPTS = 10;
-  // Slow back-off for non-transient errors: 4 s, 8 s, 15 s, 25 s, 35 s, 50 s, 60 s …
-  const SLOW_DELAYS = [4000, 8000, 15000, 25000, 35000, 50000, 60000];
-  try {
-    const stored: any = await kv.get('ovora:vapid:keys');
-    if (stored?.publicKey && stored?.privateKey) {
-      vapidPublicKey = stored.publicKey;
-      vapidPrivateKey = stored.privateKey;
-      console.log('[VAPID] Keys loaded from KV');
-    } else {
-      const keys = webpush.generateVAPIDKeys();
-      vapidPublicKey = keys.publicKey;
-      vapidPrivateKey = keys.privateKey;
-      await kv.set('ovora:vapid:keys', { publicKey: vapidPublicKey, privateKey: vapidPrivateKey });
-      console.log('[VAPID] New VAPID keys generated and stored');
-    }
-    webpush.setVapidDetails('mailto:support@ovora.app', vapidPublicKey, vapidPrivateKey);
-    vapidReady = true;
-    console.log('[VAPID] Ready');
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    // "broken pipe" / "stream closed" = HTTP/2 connection reset on cold start — transient.
-    const isBrokenPipe = msg.includes('broken pipe') || msg.includes('stream closed') ||
-      msg.includes('SendRequest') || msg.includes('connection error');
-    const isTransient = isBrokenPipe || msg.includes('network') || msg.includes('ECONNRESET');
-
-    if (attempt < MAX_ATTEMPTS) {
-      // Broken-pipe: re-dial after just 1 s (the TCP stack recovers immediately).
-      // Other transient / permanent errors: use slow exponential back-off with ±10 % jitter.
-      const base = isBrokenPipe ? 1000 : (SLOW_DELAYS[attempt - 1] ?? 60000);
-      const delay = base + Math.floor(base * 0.2 * (Math.random() - 0.5));
-
-      // Use console.warn (not error) for expected cold-start noise.
-      console.warn(
-        `[VAPID] Init attempt ${attempt}/${MAX_ATTEMPTS} failed` +
-        (isTransient ? ` (transient — ${isBrokenPipe ? 'broken-pipe' : 'network'})` : '') +
-        `. Retrying in ${Math.round(delay / 1000)} s…`,
-      );
-      setTimeout(() => initVapid(attempt + 1), delay);
-    } else {
-      console.error('[VAPID] All retry attempts exhausted. Push notifications disabled.', msg);
-    }
+// Ключи грузятся по первому требованию и дожидаются. Раньше загрузка шла по таймеру через 12 с
+// после старта: Supabase поднимает новые экземпляры функции каждые 1–2 минуты, и в эти 12 с
+// /push/vapid-key отвечал 503, а sendPushToUser молча выбрасывал уведомления.
+function ensureVapid(): Promise<boolean> {
+  if (vapidReady) return Promise.resolve(true);
+  if (!vapidLoading) {
+    vapidLoading = (async () => {
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+          let keys: any = await kv.get('ovora:vapid:keys');
+          if (!keys?.publicKey || !keys?.privateKey) {
+            keys = webpush.generateVAPIDKeys();
+            await kv.set('ovora:vapid:keys', { publicKey: keys.publicKey, privateKey: keys.privateKey });
+            console.log('[VAPID] New VAPID keys generated and stored');
+          }
+          webpush.setVapidDetails('mailto:support@ovora.app', keys.publicKey, keys.privateKey);
+          vapidPublicKey = keys.publicKey;
+          vapidReady = true;
+          return true;
+        } catch (err) {
+          console.warn(`[VAPID] Init attempt ${attempt}/3 failed:`, err instanceof Error ? err.message : err);
+          if (attempt < 3) await new Promise(r => setTimeout(r, 500 * attempt));
+        }
+      }
+      return false;
+    })().finally(() => { vapidLoading = null; });
   }
+  return vapidLoading;
 }
-// Cold-start: wait 12 s so Supabase HTTP/2 connections have time to stabilise
-// before the first KV fetch (reduces broken-pipe frequency on attempt 1).
-setTimeout(() => initVapid(), 12000);
 
 /** Send a Web Push notification to ALL subscribed devices of a user */
 async function sendPushToUser(
   email: string,
   payload: { title: string; body: string; url?: string; tag?: string; icon?: string },
 ): Promise<void> {
-  if (!vapidReady || !email) return;
+  if (!email || !(await ensureVapid())) return;
   try {
     const subs: any[] = await kv.getByPrefix(`ovora:push:sub:${email}:`);
     if (!subs.length) return;
@@ -702,8 +683,8 @@ async function sendPushToUser(
 // ── Push Routes ───────────────────────────────────────────────────────────────
 
 /** Отдать публичный VAPID-ключ фронтенду */
-app.get("/make-server-4e36197a/push/vapid-key", (c) => {
-  if (!vapidReady || !vapidPublicKey) {
+app.get("/make-server-4e36197a/push/vapid-key", async (c) => {
+  if (!(await ensureVapid())) {
     return c.json({ error: 'VAPID not ready yet, try again' }, 503);
   }
   return c.json({ publicKey: vapidPublicKey });
