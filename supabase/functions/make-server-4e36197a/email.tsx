@@ -8,6 +8,7 @@
  */
 
 import * as kv from "./kv_store.tsx";
+import { unsubscribeUrl } from "./unsubscribeLink.tsx";
 
 // ── Config ────────────────────────────────────────────────────────────────────
 const RESEND_API_URL = "https://api.resend.com/emails";
@@ -151,8 +152,9 @@ export async function purgeExpiredThrottleKeys(): Promise<number> {
 
 // ── Общая обёртка ─────────────────────────────────────────────────────────────
 function layout(content: string, preheader = "", recipientEmail?: string): string {
-  const unsubLink = recipientEmail
-    ? `${Deno.env.get("SUPABASE_URL") || ""}/functions/v1/make-server-4e36197a/email/unsubscribe?email=${encodeURIComponent(recipientEmail)}`
+  const secret = (Deno.env.get("USER_JWT_SECRET") || "").trim();
+  const unsubLink = recipientEmail && secret
+    ? unsubscribeUrl(Deno.env.get("SITE_URL") || "https://ovora-cargo.saburov.workers.dev", recipientEmail, secret)
     : "";
   return `<!DOCTYPE html>
 <html lang="ru">

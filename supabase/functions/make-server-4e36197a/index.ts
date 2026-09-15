@@ -16,6 +16,7 @@ import {
 import { rateLimitMiddleware, RL, aviaRL } from "./rateLimit.tsx";
 import { requestLimitPolicy, ADMIN_AUTH_FAILURES, type Identity } from "./requestLimits.tsx";
 import { verifiedAviaPhone } from "./aviaAuth.tsx";
+import { isValidUnsubscribeSignature } from "./unsubscribeLink.tsx";
 import { calculateAverageRating, recalculateRating } from "./rating.tsx";
 import * as kv from "./kv_store.tsx";
 import * as capacity from "./capacity.tsx";
@@ -732,19 +733,25 @@ app.post("/make-server-4e36197a/push/unsubscribe", async (c) => {
 });
 
 // ── Отписка от email-уведомлений (ссылка из футера писем) ─────────────────────
-app.get("/make-server-4e36197a/email/unsubscribe", async (c) => {
-  const email = (c.req.query("email") || "").toLowerCase().trim();
-  const escapeHtml = (s: string) => s.replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]!));
-  if (!email || !email.includes("@")) {
-    return c.html(`<!DOCTYPE html><html lang="ru"><body style="font-family:sans-serif;text-align:center;padding:48px;">Некорректный email-адрес.</body></html>`, 400);
+// Страница отписки живёт на сайте (/unsubscribe): Supabase отдаёт HTML функций как text/plain.
+// GET из старых писем перенаправляет туда. Отписка — только POST по кнопке: почтовые сканеры
+// сами открывают ссылки из писем и отписали бы человека без его ведома.
+app.get("/make-server-4e36197a/email/unsubscribe", (c) => {
+  const site = (Deno.env.get("SITE_URL") || "https://ovora-cargo.saburov.workers.dev").replace(/\/$/, "");
+  const q = new URLSearchParams({ email: c.req.query("email") || "", sig: c.req.query("sig") || "" });
+  return c.redirect(`${site}/unsubscribe?${q}`, 302);
+});
+
+app.post("/make-server-4e36197a/email/unsubscribe", async (c) => {
+  const body: any = await c.req.json().catch(() => ({}));
+  const email = String(body?.email || "").toLowerCase().trim();
+  const secret = (Deno.env.get("USER_JWT_SECRET") || "").trim();
+  if (!email.includes("@") || !isValidUnsubscribeSignature(email, String(body?.sig || ""), secret)) {
+    return c.json({ success: false, error: "INVALID_LINK" }, 400);
   }
   await setUnsubscribed(email, true);
-  console.log(`[Email] Unsubscribed via link: ${email}`);
-  return c.html(`<!DOCTYPE html><html lang="ru"><head><meta charset="UTF-8"/><title>Ovora Cargo</title></head>
-<body style="font-family:'Segoe UI',Arial,sans-serif;background:#0a1220;color:#e2e8f0;text-align:center;padding:64px 24px;">
-  <h1 style="font-size:22px;margin-bottom:12px;">Вы отписаны от email-уведомлений</h1>
-  <p style="color:#7a9ab8;font-size:14px;">Адрес <strong>${escapeHtml(email)}</strong> больше не будет получать письма от Ovora Cargo.</p>
-</body></html>`);
+  console.log(`[Email] Unsubscribed via signed link: ${email}`);
+  return c.json({ success: true });
 });
 
 // ── Health ────────────────────────────────────────────────────────────────────

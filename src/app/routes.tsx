@@ -460,6 +460,11 @@ export const router = createBrowserRouter([
           .then(m => ({ Component: m.CompetitorAnalysisPage })),
       },
       {
+        path: "/unsubscribe",
+        lazy: () => import("./components/UnsubscribePage")
+          .then(m => ({ Component: hiddenFromWebvisor(m.UnsubscribePage) })),
+      },
+      {
         path: "/track/:tripId",
         lazy: () => import("./components/PublicTrackingPage")
           .then(m => ({ Component: m.PublicTrackingPage })),
