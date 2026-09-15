@@ -2508,6 +2508,24 @@ app.delete("/make-server-4e36197a/reviews/:reviewId", async (c) => {
 //  KV: ovora:chatmeta:{chatId}       → chat metadata (participants, contact info, unread)
 // ══════════════════════════════════════════════════════════════════════════════
 
+/**
+ * Участники нового чата: звонящий среди них, их двое и больше, и каждый — зарегистрированный пользователь.
+ * Возвращает текст ошибки или null. Используется и в /chat/init, и в /chat/message: сообщение может
+ * прийти раньше init (сайт вызывает init без ожидания), и тогда чат создаётся с той же проверкой.
+ */
+async function checkNewChatParticipants(callerEmail: string, proposed: unknown): Promise<string | null> {
+  const list: string[] = Array.isArray(proposed) ? proposed.filter(Boolean).map(String) : [];
+  if (!list.includes(callerEmail)) return "callerEmail must be one of participants";
+  if (new Set(list).size < 2) return "a chat needs at least two participants";
+  for (const email of list) {
+    if (!(await profile.users.get(supabase, email).catch(() => null))) {
+      console.warn(`[chat] Rejected: participant is not a registered user`);
+      return `Participant ${email} is not a registered user`;
+    }
+  }
+  return null;
+}
+
 // Init / upsert chat room
 app.post("/make-server-4e36197a/chat/init", async (c) => {
   try {
@@ -2535,17 +2553,9 @@ app.post("/make-server-4e36197a/chat/init", async (c) => {
       // Новый чат — звонящий обязан быть среди заявленных участников, и каждый
       // участник обязан быть реальным зарегистрированным пользователем
       // (иначе можно подсунуть произвольный email несуществующего человека).
-      const proposed: string[] = Array.isArray(participants) ? participants.filter(Boolean) : [];
-      if (!proposed.includes(callerEmail)) {
-        return c.json({ error: "callerEmail must be one of participants" }, 400);
-      }
-      for (const email of proposed) {
-        const user = await profile.users.get(supabase, String(email).toLowerCase().trim()).catch(() => null);
-        if (!user) {
-          console.warn(`[chat/init] Rejected: participant ${email} is not a registered user`);
-          return c.json({ error: `Participant ${email} is not a registered user` }, 400);
-        }
-      }
+      const invalid = await checkNewChatParticipants(callerEmail, participants);
+      if (invalid) return c.json({ error: invalid }, 400);
+      const proposed: string[] = participants.filter(Boolean).map(String);
       finalParticipants = proposed;
     }
 
@@ -2594,13 +2604,17 @@ app.post("/make-server-4e36197a/chat/message", async (c) => {
       }
     }
 
-    // Проверка: senderId должен быть участником чата
+    // Проверка: senderId должен быть участником чата. Чата ещё нет (сообщение пришло раньше init) —
+    // участники из запроса проверяются так же строго, как в /chat/init. Раньше их брали как есть.
     const metaCheck: any = await kv.get(`ovora:chatmeta:${chatId}`);
-    if (metaCheck?.participants && Array.isArray(metaCheck.participants) && metaCheck.participants.length > 0) {
+    if (metaCheck?.participants?.length > 0) {
       if (!metaCheck.participants.includes(senderId)) {
         console.warn(`[chat/message] Unauthorized: ${senderId} is not a participant of chat ${chatId}`);
         return c.json({ error: "Forbidden: you are not a participant of this chat" }, 403);
       }
+    } else {
+      const invalid = await checkNewChatParticipants(String(senderId), participants);
+      if (invalid) return c.json({ error: invalid }, 403);
     }
 
     const msgId = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -2706,7 +2720,9 @@ app.get("/make-server-4e36197a/chat/:chatId/messages", async (c) => {
 
     // IDOR fix: verify caller is a participant before exposing messages
     const meta: any = await kv.get(`ovora:chatmeta:${chatId}`);
-    if (meta?.participants?.length > 0 && !meta.participants.includes(callerEmail)) {
+    // Чата нет (ещё не создан или удалён) — сообщения без участников никому не отдаются.
+    if (!meta?.participants?.length) return c.json({ messages: [] });
+    if (!meta.participants.includes(callerEmail)) {
       console.warn(`[GET /chat/messages] IDOR attempt: ${callerEmail} tried to read chat ${chatId}`);
       return c.json({ error: "Forbidden: you are not a participant of this chat" }, 403);
     }
@@ -2731,8 +2747,9 @@ app.put("/make-server-4e36197a/chat/:chatId/read", async (c) => {
 
     const metaKey = `ovora:chatmeta:${chatId}`;
     const meta: any = await kv.get(metaKey) || {};
+    if (!meta?.participants?.length) return c.json({ success: true }); // чата нет — отмечать нечего
 
-    if (meta?.participants?.length > 0 && !meta.participants.includes(userEmail)) {
+    if (!meta.participants.includes(userEmail)) {
       return c.json({ error: "Forbidden: you are not a participant of this chat" }, 403);
     }
 
@@ -2773,7 +2790,8 @@ app.put("/make-server-4e36197a/chat/:chatId/proposal/:proposalId", async (c) => 
     // Update chat metadata
     const metaKey = `ovora:chatmeta:${chatId}`;
     const meta: any = await kv.get(metaKey) || {};
-    if (meta?.participants?.length > 0 && !meta.participants.includes(senderId)) {
+    if (!meta?.participants?.length) return c.json({ error: "Chat not found" }, 404);
+    if (!meta.participants.includes(senderId)) {
       console.warn(`[proposal] IDOR attempt: ${senderId} tried to update proposal in chat ${chatId}`);
       return c.json({ error: "Forbidden: you are not a participant of this chat" }, 403);
     }
@@ -3007,6 +3025,8 @@ app.put("/make-server-4e36197a/chat/:chatId/proposal/:proposalId", async (c) => 
 app.get("/make-server-4e36197a/chats/user/:email", async (c) => {
   try {
     const email = decodeURIComponent(c.req.param("email"));
+    // В списке — контакты собеседников (телефоны) и последние сообщения. Раньше отдавался любому, кто знает почту.
+    if (!isActingAs(c, email)) return c.json(FORBIDDEN_NOT_YOU, 403);
     const allMeta: any[] = await kv.getByPrefix(`ovora:chatmeta:`);
     const userChats = allMeta
       .filter(m => m && Array.isArray(m.participants) && m.participants.includes(email))
@@ -3019,28 +3039,6 @@ app.get("/make-server-4e36197a/chats/user/:email", async (c) => {
     return c.json({ chats: userChats });
   } catch (err) {
     console.log("Error GET /chats/user:", err);
-    return c.json({ error: 'Внутренняя ошибка сервера' }, 500);
-  }
-});
-
-// Одноразовая очистка демо-чатов из KV
-app.delete("/make-server-4e36197a/chats/cleanup-demo", requireAdminChecked, async (c) => {
-  try {
-    const allMeta: any[] = await kv.getByPrefix(`ovora:chatmeta:`);
-    const demoMetas = allMeta.filter(m => m?.chatId?.startsWith('demo_'));
-    for (const m of demoMetas) {
-      // Удаляем метаданные чата
-      await kv.del(`ovora:chatmeta:${m.chatId}`);
-      // Удаляем все сообщения этого чата
-      const msgs: any[] = await kv.getByPrefix(`ovora:chat:${m.chatId}:`);
-      for (const msg of msgs) {
-        if (msg?.msgId) await kv.del(`ovora:chat:${m.chatId}:${msg.msgId}`);
-      }
-    }
-    console.log(`[cleanup-demo] Удалено демо-чатов: ${demoMetas.length}`);
-    return c.json({ deleted: demoMetas.length });
-  } catch (err) {
-    console.log("Error DELETE /chats/cleanup-demo:", err);
     return c.json({ error: 'Внутренняя ошибка сервера' }, 500);
   }
 });
@@ -3185,7 +3183,9 @@ app.delete("/make-server-4e36197a/chat/:chatId", async (c) => {
 
     // IDOR fix: only participants may delete the chat
     const participants: string[] = meta.participants || [];
-    if (participants.length > 0 && !participants.includes(callerEmail)) {
+    // Нет участников — нет и права удалять: раньше так стирались сообщения чата, у которого пропала карточка.
+    if (!participants.length) return c.json({ error: "Chat not found" }, 404);
+    if (!participants.includes(callerEmail)) {
       console.warn(`[delete-chat] Unauthorized: ${callerEmail} tried to delete chat ${chatId}`);
       return c.json({ error: "Forbidden: you are not a participant of this chat" }, 403);
     }
@@ -3255,7 +3255,8 @@ app.delete("/make-server-4e36197a/chat/:chatId/message/:msgId", async (c) => {
 
     // Only the message author may delete it
     const existing: any = await kv.get(`ovora:chat:${chatId}:${msgId}`);
-    if (existing && existing.senderId && existing.senderId !== callerEmail) {
+    if (!existing) return c.json({ error: "Message not found" }, 404);
+    if (existing.senderId !== callerEmail) {
       console.warn(`[delete-message] Unauthorized: ${callerEmail} tried to delete message by ${existing.senderId}`);
       return c.json({ error: "Forbidden: you are not the author of this message" }, 403);
     }
