@@ -6,9 +6,11 @@ export function calculateAverageRating(ratings: number[]): number {
   return Math.round((sum / valid.length) * 10) / 10;
 }
 
-// LOG-14: Recalculate and propagate rating after review creation or deletion.
-// Reads all reviews for targetEmail, computes average, updates user record + all trips.
-export async function recalculateRating(kv: any, targetEmail: string): Promise<void> {
+// LOG-14: пересчёт рейтинга после нового или удалённого отзыва. Рейтинг пишется в профиль и
+// в карточки поездок водителя; поездки обновляет переданная функция (они в таблице trips).
+export async function recalculateRating(
+  kv: any, targetEmail: string, setTripsRating: (driverEmail: string, rating: number) => Promise<void>,
+): Promise<void> {
   const targetIndex: any[] = await kv.getByPrefix(`ovora:userreviews:target:${targetEmail}:`);
   const reviewIds = [...new Set(targetIndex.filter((e: any) => e?.reviewId).map((e: any) => e.reviewId))];
   const reviews: any[] = reviewIds.length > 0
@@ -16,33 +18,9 @@ export async function recalculateRating(kv: any, targetEmail: string): Promise<v
     : [];
   const avgRating = reviews.length > 0 ? calculateAverageRating(reviews.map((r: any) => r.rating)) : 0;
 
-  // Update user record
   const userKey = `ovora:user:email:${targetEmail.toLowerCase().trim()}`;
   const user: any = await kv.get(userKey);
   if (user) await kv.set(userKey, { ...user, rating: avgRating });
 
-  // Update all driver trips
-  const driverTripsIndex: any[] = await kv.getByPrefix(`ovora:drivertrips:${targetEmail}:`);
-  let trips: any[];
-  if (driverTripsIndex.length > 0) {
-    const tripIds = driverTripsIndex.map((e: any) => e.tripId).filter(Boolean);
-    trips = tripIds.length > 0
-      ? (await kv.mget(tripIds.map((id: string) => `ovora:trip:${id}`))).filter((t: any) => t && !t.deletedAt)
-      : [];
-  } else {
-    const allTrips: any[] = await kv.getByPrefix(`ovora:trip:`);
-    trips = allTrips.filter((t: any) => t && !t.deletedAt && t.driverEmail === targetEmail);
-  }
-  // Условная запись: обычный set затёр бы параллельное списание мест на поездке.
-  for (const trip of trips) {
-    let current = trip;
-    for (let attempt = 0; attempt < 3 && current; attempt++) {
-      if (current.driverRating === avgRating) break;
-      const written = await kv.setIfUnchanged(`ovora:trip:${current.id}`, current.updatedAt || null, {
-        ...current, driverRating: avgRating, updatedAt: new Date().toISOString(),
-      });
-      if (written) break;
-      current = await kv.get(`ovora:trip:${current.id}`);
-    }
-  }
+  await setTripsRating(targetEmail, avgRating);
 }
