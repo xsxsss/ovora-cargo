@@ -2361,10 +2361,29 @@ app.post("/make-server-4e36197a/reviews",
       }
     }
 
-    const { callerEmail: _ignored, ...cleanedBody } = body as any;
+    // Оценка попадает в рейтинг — только целое 1..5 (раньше принималось любое число, 1000 поднимало средний балл).
+    const rating = Number(body.rating);
+    if (!Number.isInteger(rating) || rating < 1 || rating > 5) {
+      return c.json({ error: 'rating must be a whole number from 1 to 5' }, 400);
+    }
+    const categories: Record<string, number> = {};
+    for (const name of ['punctuality', 'reliability', 'communication', 'packaging']) {
+      const v = Number(body.categories?.[name]);
+      categories[name] = Number.isInteger(v) && v >= 1 && v <= 5 ? v : rating;
+    }
     const reviewId = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     const now = new Date().toISOString();
-    const review = { ...cleanedBody, authorEmail, targetEmail, tripId, reviewId, createdAt: now };
+    // Только известные поля: раньше в отзыв сливалось всё тело запроса, в том числе verified: true от клиента.
+    // «Проверенный» ставит сервер — пара и завершённая поездка проверены выше.
+    const review = {
+      reviewId, authorEmail, targetEmail, tripId, rating, categories,
+      authorName: clampStr(body.authorName, 120),
+      comment: clampStr(body.comment, 2000),
+      tripRoute: clampStr(body.tripRoute, 200),
+      type: 'given',
+      verified: true,
+      createdAt: now,
+    };
     await kv.set(`ovora:review:${reviewId}`, review);
 
     // ✅ Вторичные индексы — быстрый поиск без full-scan
@@ -2455,41 +2474,8 @@ app.get("/make-server-4e36197a/reviews", async (c) => {
   }
 });
 
-app.delete("/make-server-4e36197a/reviews/:reviewId", async (c) => {
-  try {
-    const reviewId = c.req.param("reviewId");
-    const existing: any = await kv.get(`ovora:review:${reviewId}`);
-    if (!existing) return c.json({ error: "Review not found" }, 404);
-
-    // Только автор может удалять свой отзыв — callerEmail обязателен
-    const { callerEmail } = await c.req.json().catch(() => ({})) as any;
-    if (!callerEmail) {
-      return c.json({ error: "callerEmail is required" }, 400);
-    }
-    if (existing.authorEmail && existing.authorEmail !== callerEmail) {
-      console.warn(`[DELETE /reviews] Unauthorized: ${callerEmail} tried to delete review by ${existing.authorEmail}`);
-      return c.json({ error: "Forbidden: you are not the author of this review" }, 403);
-    }
-
-    await kv.del(`ovora:review:${reviewId}`);
-    // Чистим вторичные индексы
-    if (existing.targetEmail) await kv.del(`ovora:userreviews:target:${existing.targetEmail}:${reviewId}`).catch(() => {});
-    if (existing.authorEmail) await kv.del(`ovora:userreviews:author:${existing.authorEmail}:${reviewId}`).catch(() => {});
-
-    // LOG-14: Recalculate rating after review deletion
-    if (existing.targetEmail) {
-      await recalculateRating(kv, existing.targetEmail, applyUserRating).catch((e: any) =>
-        console.warn('[DELETE /reviews] Failed to recalculate rating:', e)
-      );
-    }
-
-    console.log(`[DELETE /reviews] Deleted review ${reviewId} by ${callerEmail || 'unknown'}`);
-    return c.json({ success: true });
-  } catch (err) {
-    console.log("Error DELETE /reviews/:reviewId:", err);
-    return c.json({ error: 'Внутренняя ошибка сервера' }, 500);
-  }
-});
+// DELETE /reviews/:reviewId удалён: «автора» он брал из тела запроса без токена — любой удалял чужой отзыв,
+// указав почту автора. Сайт адрес не вызывал. Отзыв снимает админ (DELETE /admin/reviews/:reviewId).
 
 // ════════════════════════════���═════════════════════════════════════════════════
 //  CHAT ROUTES — полная поддержка text / proposal / system с��общений
