@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
+import { childSeatPrice } from '../utils/pricing';
 import { motion } from 'motion/react';
 import { X } from 'lucide-react';
 import { Users, Truck, Plus, Minus, CheckCircle, AlertCircle } from 'lucide-react';
@@ -120,7 +121,7 @@ export function ProposalFormModal({
 
   // ── Price calculations ────────────────────────────────────────────────────
   const totalSeatsPrice = includeSeats
-    ? offerSeats * (trip?.pricePerSeat || 0) + offerChildren * Math.round((trip?.pricePerSeat || 0) / 2)
+    ? offerSeats * (trip?.pricePerSeat || 0) + offerChildren * childSeatPrice(trip)
     : 0;
   const totalCargoPrice = includeCargo ? offerCargoKg * (trip?.pricePerKg || 0) : 0;
   const totalPrice = totalSeatsPrice + totalCargoPrice;
@@ -441,7 +442,7 @@ export function ProposalFormModal({
                           </span>
                         </p>
                         <p className={`text-[10px] ${labelCls}`}>
-                          {Math.round((trip.pricePerSeat || 0) / 2)} TJS/место
+                          {childSeatPrice(trip)} TJS/место
                         </p>
                       </div>
                       <div className="flex items-center gap-2 shrink-0">

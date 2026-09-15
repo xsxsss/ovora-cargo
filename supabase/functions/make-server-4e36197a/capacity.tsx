@@ -179,11 +179,12 @@ export function parseOfferCounts(body: any):
   return { ok: true, counts };
 }
 
-/** Та же формула, что во фронте (TripDetail.tsx, ProposalFormModal.tsx): детское место за полцены. */
+/** Та же формула, что во фронте (src/app/utils/pricing.ts): детское место — цена водителя, у старых поездок — половина взрослого. */
 export function expectedOfferPrice(trip: any, counts: Required<OfferCounts>): number {
   const perSeat = Number(trip?.pricePerSeat) || 0;
+  const perChild = Number(trip?.pricePerChild) || 0;
   const perKg = Number(trip?.pricePerKg) || 0;
   return counts.requestedSeats * perSeat
-    + counts.requestedChildren * Math.round(perSeat / 2)
+    + counts.requestedChildren * (perChild > 0 ? perChild : Math.round(perSeat / 2))
     + counts.requestedCargo * perKg;
 }

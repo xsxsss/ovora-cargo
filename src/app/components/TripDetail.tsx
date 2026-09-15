@@ -1,4 +1,5 @@
 import { useParams, useNavigate } from 'react-router';
+import { childSeatPrice } from '../utils/pricing';
 import { useState, useEffect, useRef, useMemo } from 'react';
 import { motion } from 'motion/react';
 import { useUser } from '../contexts/UserContext';
@@ -628,7 +629,7 @@ function ActiveTripDetail({ trip, isDark, userRole }: { trip: any; isDark: boole
   };
 
   // Calculate prices
-  const totalSeatsPrice = includeSeats ? offerSeats * (trip.pricePerSeat || 0) + offerChildren * Math.round((trip.pricePerSeat || 0) / 2) : 0;
+  const totalSeatsPrice = includeSeats ? offerSeats * (trip.pricePerSeat || 0) + offerChildren * childSeatPrice(trip) : 0;
   const totalCargoPrice = includeCargo ? offerCargoKg * (trip.pricePerKg || 0) : 0;
   const totalPrice = totalSeatsPrice + totalCargoPrice;
 
@@ -1371,10 +1372,10 @@ function ActiveTripDetail({ trip, isDark, userRole }: { trip: any; isDark: boole
                           {offerChildren > 0 && (
                             <div className="flex items-center justify-between">
                               <span className="text-xs font-semibold text-[#1978e5]">
-                                {offerChildren} дет. × {Math.round((trip.pricePerSeat || 0) / 2)} {trip.currency || 'TJS'}
+                                {offerChildren} дет. × {childSeatPrice(trip)} {trip.currency || 'TJS'}
                               </span>
                               <span className="text-xs font-bold text-[#1978e5]">
-                                {offerChildren * Math.round((trip.pricePerSeat || 0) / 2)} {trip.currency || 'TJS'}
+                                {offerChildren * childSeatPrice(trip)} {trip.currency || 'TJS'}
                               </span>
                             </div>
                           )}
@@ -1397,7 +1398,7 @@ function ActiveTripDetail({ trip, isDark, userRole }: { trip: any; isDark: boole
                       </div>
                       <div className="flex-1 min-w-0">
                         <p className={`text-sm font-extrabold ${isDark ? 'text-white' : 'text-[#0f172a]'}`}>Дети <span className={`font-normal text-[10px] ${isDark ? 'text-[#475569]' : 'text-[#94a3b8]'}`}>(до 12 лет · ½ цены)</span></p>
-                        <p className={`text-[10px] font-semibold ${isDark ? 'text-[#475569]' : 'text-[#94a3b8]'}`}>{Math.round((trip.pricePerSeat || 0) / 2)} {trip.currency || 'TJS'}/место</p>
+                        <p className={`text-[10px] font-semibold ${isDark ? 'text-[#475569]' : 'text-[#94a3b8]'}`}>{childSeatPrice(trip)} {trip.currency || 'TJS'}/место</p>
                       </div>
                       <div className="flex items-center gap-2 shrink-0">
                         <button
@@ -1962,7 +1963,7 @@ function ActiveTripDetail({ trip, isDark, userRole }: { trip: any; isDark: boole
                         </div>
                         <div style={{ flex:1 }}>
                           <p style={{ fontSize:13, fontWeight:800, color:'#fff' }}>Дети <span style={{ fontWeight:400, fontSize:11, color:'#4a6580' }}>(до 12 лет · ½ цены)</span></p>
-                          <p style={{ fontSize:11, color:'#4a6580' }}>{Math.round((trip.pricePerSeat || 0) / 2)} {trip.currency||'TJS'}/место</p>
+                          <p style={{ fontSize:11, color:'#4a6580' }}>{childSeatPrice(trip)} {trip.currency||'TJS'}/место</p>
                         </div>
                         <div style={{ display:'flex', alignItems:'center', gap:8, flexShrink:0 }}>
                           <button className="td-counter-btn" onClick={() => setOfferChildren(Math.max(0, (Number(offerChildren)||0) - 1))} style={{ background:'#1a2d3d', color:'#fff' }}><Minus style={{ width:13, height:13 }} /></button>

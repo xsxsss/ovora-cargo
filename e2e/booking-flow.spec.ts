@@ -38,13 +38,13 @@ test.describe.serial('бронирование мест', () => {
     sender2Token = await login(request, sender2, 'sender');
   });
 
-  test('водитель публикует поездку на 3 места по 100', async ({ request }) => {
+  test('водитель публикует поездку: 3 места по 100, 2 детских по 40', async ({ request }) => {
     const res = await request.post(`${API}/trips`, {
       headers: as(driverToken),
       data: {
         driverEmail: driver, driverName: 'E2E Driver', from: 'Душанбе', to: 'Худжанд',
         date: new Date(Date.now() + 86_400_000).toISOString().slice(0, 10),
-        availableSeats: 3, childSeats: 0, cargoCapacity: 0, pricePerSeat: 100, pricePerKg: 0,
+        availableSeats: 3, childSeats: 2, cargoCapacity: 0, pricePerSeat: 100, pricePerChild: 40, pricePerKg: 0,
       },
     });
     expect(res.status(), await res.text()).toBe(200);
@@ -69,10 +69,18 @@ test.describe.serial('бронирование мест', () => {
     expect(res.status()).toBe(400);
   });
 
-  test('отправитель бронирует 2 места по правильной цене', async ({ request }) => {
+  test('детское место по цене водителя, а не половина взрослого', async ({ request }) => {
+    const halfPrice = await request.post(`${API}/offers`, {
+      headers: as(senderToken),
+      data: { tripId, senderEmail: sender, senderName: 'S1', requestedSeats: 2, requestedChildren: 1, price: 250 },
+    });
+    expect(halfPrice.status()).toBe(400);
+  });
+
+  test('отправитель бронирует 2 места и 1 детское по правильной цене', async ({ request }) => {
     const res = await request.post(`${API}/offers`, {
       headers: as(senderToken),
-      data: { tripId, senderEmail: sender, senderName: 'S1', requestedSeats: 2, price: 200 },
+      data: { tripId, senderEmail: sender, senderName: 'S1', requestedSeats: 2, requestedChildren: 1, price: 240 },
     });
     expect(res.status(), await res.text()).toBe(200);
     const { offer } = await res.json();
@@ -90,7 +98,9 @@ test.describe.serial('бронирование мест', () => {
   test('водитель принимает — свободных мест становится 1', async ({ request }) => {
     const res = await request.put(`${API}/offers/${tripId}/${offerId}`, { headers: as(driverToken), data: { status: 'accepted' } });
     expect(res.status(), await res.text()).toBe(200);
-    expect((await getTrip(request, tripId)).availableSeats).toBe(1);
+    const trip = await getTrip(request, tripId);
+    expect(trip.availableSeats).toBe(1);
+    expect(trip.childSeats).toBe(1);
   });
 
   test('заявки поездки видит водитель, посторонний — нет', async ({ request }) => {
@@ -116,7 +126,9 @@ test.describe.serial('бронирование мест', () => {
   test('отправитель отменяет принятую бронь — места возвращаются', async ({ request }) => {
     const res = await request.put(`${API}/offers/${tripId}/${offerId}`, { headers: as(senderToken), data: { status: 'cancelled' } });
     expect(res.status(), await res.text()).toBe(200);
-    expect((await getTrip(request, tripId)).availableSeats).toBe(3);
+    const trip = await getTrip(request, tripId);
+    expect(trip.availableSeats).toBe(3);
+    expect(trip.childSeats).toBe(2);
   });
 
   test('отменённую бронь нельзя «оживить»', async ({ request }) => {

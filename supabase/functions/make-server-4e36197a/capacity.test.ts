@@ -282,7 +282,12 @@ describe('parseOfferCounts', () => {
 });
 
 describe('expectedOfferPrice', () => {
-  it('совпадает с формулой фронтенда: детское место — Math.round(цена / 2)', () => {
+  it('детское место — цена, которую указал водитель', () => {
+    const t = { pricePerSeat: 300, pricePerChild: 120, pricePerKg: 3 };
+    expect(expectedOfferPrice(t, { requestedSeats: 1, requestedChildren: 2, requestedCargo: 0 })).toBe(300 + 2 * 120);
+  });
+
+  it('старая поездка без цены ребёнка — половина взрослого места', () => {
     const t = { pricePerSeat: 125, pricePerKg: 3 };
     expect(expectedOfferPrice(t, { requestedSeats: 2, requestedChildren: 3, requestedCargo: 10 }))
       .toBe(2 * 125 + 3 * Math.round(125 / 2) + 10 * 3);
