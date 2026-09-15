@@ -1,0 +1,46 @@
+name: E2E staging
+
+# Сквозные тесты против тестовой площадки: после выкладки в staging, каждый день и по кнопке.
+# Упавший прогон GitHub присылает владельцу на почту.
+on:
+  push:
+    branches: [staging]
+  schedule:
+    - cron: '0 4 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-staging
+  cancel-in-progress: true
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - run: npm ci --legacy-peer-deps
+
+      - run: npx playwright install --with-deps chromium
+
+      # После push сайт собирает Cloudflare, а сервер — отдельный workflow: даём им выложиться.
+      - name: Wait for staging deploy
+        if: github.event_name == 'push'
+        run: sleep 240
+
+      - run: npm run test:e2e
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report
+          path: playwright-report
+          retention-days: 7
