@@ -79,6 +79,13 @@ test.describe('без входа нельзя действовать от чуж
     expect(res.status()).toBe(403);
   });
 
+  test('видеть заявки чужой поездки с телефонами отправителей', async ({ request }) => {
+    const trips = await (await request.get(`${API}/trips`, { headers: siteHeaders() })).json();
+    const tripId = trips?.trips?.[0]?.id ?? 'no-trips';
+    const res = await request.get(`${API}/offers/trip/${tripId}`, { headers: siteHeaders() });
+    expect((await res.json()).offers ?? []).toEqual([]);
+  });
+
   test('читать чужую переписку', async ({ request }) => {
     const res = await request.get(`${API}/chat/pair_x_y/messages?callerEmail=victim@mail.ru`, { headers: siteHeaders() });
     denied(res.status());

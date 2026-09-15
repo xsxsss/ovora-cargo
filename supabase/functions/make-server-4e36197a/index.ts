@@ -2067,9 +2067,16 @@ app.post("/make-server-4e36197a/offers",
 app.get("/make-server-4e36197a/offers/trip/:tripId", async (c) => {
   try {
     const tripId = c.req.param("tripId");
+    // Заявки содержат имя, телефон и почту отправителей: все — только водителю этой поездки
+    // (и админу), отправителю — только его собственная, постороннему — ничего.
+    const trip: any = await kv.get(`ovora:trip:${tripId}`);
+    const isAdmin = await isAdminCaller(c, isAdminJwtRevoked);
+    const canSeeAll = isAdmin || (trip?.driverEmail && isActingAs(c, trip.driverEmail));
+    const caller = getCallerEmail(c);
+    if (!canSeeAll && !caller && userAuthEnabled()) return c.json({ offers: [] });
     const offers: any[] = await kv.getByPrefix(`ovora:offer:${tripId}:`);
     const sorted = offers
-      .filter(o => o)
+      .filter(o => o && (canSeeAll || !userAuthEnabled() || String(o.senderEmail || '').toLowerCase() === String(caller).toLowerCase()))
       .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
     return c.json({ offers: sorted });
   } catch (err) {
