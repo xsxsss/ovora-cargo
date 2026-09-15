@@ -290,6 +290,8 @@ const ALLOWED_ORIGINS = [
   // GitHub Pages текущего аккаунта. Прежний домен magamed99.github.io удалён:
   // аккаунт заблокирован GitHub и обслуживать сайт уже не может.
   "https://xsxsss.github.io",
+  // Cloudflare Workers — основной сайт.
+  "https://ovora-cargo.saburov.workers.dev",
   // local dev
   "http://localhost:5173",
   "http://localhost:4173",
@@ -302,6 +304,8 @@ app.use("/*", cors({
     if (ALLOWED_ORIGINS.includes(origin)) return origin;
     // Allow any subdomain of ovora-cargo.ru (http and https)
     if (/^https?:\/\/([a-z0-9-]+\.)?ovora-cargo\.ru$/.test(origin)) return origin;
+    // Тестовые версии веток на Cloudflare: https://<версия>-ovora-cargo.saburov.workers.dev
+    if (/^https:\/\/[a-z0-9-]+-ovora-cargo\.saburov\.workers\.dev$/.test(origin)) return origin;
     return null; // deny
   },
   allowHeaders: ["Content-Type", "Authorization", "X-Admin-Code", "X-Admin-Token", "X-Csrf-Token", "X-User-Token", "X-Avia-Token"],
