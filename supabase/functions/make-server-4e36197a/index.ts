@@ -473,6 +473,10 @@ const supabase = createClient(
 
 // ── Bucket setup (idempotent) ─────────────────────────────────────────────────
 const BUCKET = 'make-4e36197a-documents';
+// Разбор документов работает с ФИО, датой рождения и номером паспорта. В логи Supabase это не пишем:
+// логи читает любой с доступом к проекту и хранятся они вне наших правил удаления данных.
+// Для отладки распознавания — секрет OCR_DEBUG=1 на тестовом проекте.
+const ocrDebug: (...args: unknown[]) => void = Deno.env.get('OCR_DEBUG') === '1' ? console.log : () => {};
 const AVATAR_BUCKET = 'make-4e36197a-avatars';
 const ADS_BUCKET = 'make-4e36197a-ads';
 const AVIA_PASSPORT_BUCKET = 'make-4e36197a-avia-passports';
@@ -937,7 +941,6 @@ app.post("/make-server-4e36197a/ocr/scan-document", async (c) => {
 
     const result = await extractDocumentData(imageBase64, documentType || 'passport');
 
-    console.log('[OCR Prescan] Result:', JSON.stringify(result));
 
     // Convert birthDate from DD.MM.YYYY → YYYY-MM-DD for frontend date input
     let birthDateISO: string | null = null;
@@ -3328,7 +3331,7 @@ async function extractTextFromImage(imageBase64: string): Promise<string> {
     return simulateOCR();
   }
 
-  console.log('[OCR] API Key found:', apiKey.substring(0, 4) + '...' + apiKey.substring(apiKey.length - 4));
+  ocrDebug('[OCR] API Key found:', apiKey.substring(0, 4) + '...' + apiKey.substring(apiKey.length - 4));
   console.log('[OCR] Starting dual OCR request (rus + eng)...');
 
   try {
@@ -3379,7 +3382,7 @@ async function extractTextFromImage(imageBase64: string): Promise<string> {
         }
         if (json.ParsedResults && json.ParsedResults.length > 0) {
           const txt: string = json.ParsedResults[0].ParsedText || '';
-          console.log(`[OCR] [${language}] ${txt.length} chars. Preview:`, txt.substring(0, 400));
+          ocrDebug(`[OCR] [${language}] ${txt.length} chars. Preview:`, txt.substring(0, 400));
           return txt;
         }
         console.warn(`[OCR] [${language}] No ParsedResults in response`, JSON.stringify(json).substring(0, 300));
@@ -3603,8 +3606,8 @@ function parseDocumentText(text: string, documentType: string): {
   }
 
   const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
-  console.log('[Parser] Processing', lines.length, 'lines for', documentType);
-  console.log('[Parser] Full text preview (first 800):', text.substring(0, 800));
+  ocrDebug('[Parser] Processing', lines.length, 'lines for', documentType);
+  ocrDebug('[Parser] Full text preview (first 800):', text.substring(0, 800));
 
   let firstName: string | null = null;
   let lastName: string | null = null;
@@ -3653,7 +3656,7 @@ function parseDocumentText(text: string, documentType: string): {
       const mrzChars = (clean.match(/[A-Z0-9<]/g) || []).length;
       return clean.length >= 20 && mrzChars / clean.length >= 0.70;
     });
-  console.log('[Parser] MRZ candidate lines:', mrzCandidates);
+  ocrDebug('[Parser] MRZ candidate lines:', mrzCandidates);
 
   const MRZ_LINE1_RX = /^P[A-Z<][A-Z<]{3}/;
   const mrzLine1 = mrzCandidates.find(l => MRZ_LINE1_RX.test(l));
@@ -3670,15 +3673,15 @@ function parseDocumentText(text: string, documentType: string): {
   let mrzPatronymic: string | null = null;
   if (mrzLine1) {
     const issuingCountry = mrzLine1.substring(2, 5).replace(/</g, '');
-    if (issuingCountry) console.log('[Parser] MRZ issuing country:', issuingCountry);
+    if (issuingCountry) ocrDebug('[Parser] MRZ issuing country:', issuingCountry);
     const nameSection = mrzLine1.substring(5);
     const dcIdx = nameSection.indexOf('<<');
     if (dcIdx > 0) {
       const rawLast = nameSection.substring(0, dcIdx).replace(/</g, ' ').trim();
       const nameParts = nameSection.substring(dcIdx + 2).split('<').filter(p => p.length > 1);
-      if (rawLast.length > 1) { mrzLastName = rawLast; console.log('[Parser] MRZ lastName (latin, fallback):', mrzLastName); }
-      if (nameParts.length > 0) { mrzFirstName = nameParts[0]; console.log('[Parser] MRZ firstName (latin, fallback):', mrzFirstName); }
-      if (nameParts.length > 1) { mrzPatronymic = nameParts[1]; console.log('[Parser] MRZ patronymic (latin, fallback):', mrzPatronymic); }
+      if (rawLast.length > 1) { mrzLastName = rawLast; ocrDebug('[Parser] MRZ lastName (latin, fallback):', mrzLastName); }
+      if (nameParts.length > 0) { mrzFirstName = nameParts[0]; ocrDebug('[Parser] MRZ firstName (latin, fallback):', mrzFirstName); }
+      if (nameParts.length > 1) { mrzPatronymic = nameParts[1]; ocrDebug('[Parser] MRZ patronymic (latin, fallback):', mrzPatronymic); }
     }
   }
 
@@ -3686,17 +3689,17 @@ function parseDocumentText(text: string, documentType: string): {
   if (mrzLine2 && mrzLine2.length >= 28) {
     if (!documentNumber) {
       const rawNum = mrzLine2.substring(0, 9).split('<')[0].replace(/[^A-Z0-9]/g, '');
-      if (rawNum.length >= 5) { documentNumber = rawNum; console.log('[Parser] MRZ passport №:', documentNumber); }
+      if (rawNum.length >= 5) { documentNumber = rawNum; ocrDebug('[Parser] MRZ passport №:', documentNumber); }
     }
     const nat = mrzLine2.substring(10, 13).replace(/</g, '');
-    if (nat) console.log('[Parser] MRZ nationality:', nat);
+    if (nat) ocrDebug('[Parser] MRZ nationality:', nat);
     if (!birthDate) {
       const dob = mrzYYMMDDtoDMY(mrzLine2.substring(13, 19), false);
-      if (dob) { birthDate = dob; console.log('[Parser] MRZ birthDate:', birthDate); }
+      if (dob) { birthDate = dob; ocrDebug('[Parser] MRZ birthDate:', birthDate); }
     }
     if (!expiryDate) {
       const exp = mrzYYMMDDtoDMY(mrzLine2.substring(21, 27), true);
-      if (exp) { expiryDate = exp; console.log('[Parser] MRZ expiryDate:', expiryDate); }
+      if (exp) { expiryDate = exp; ocrDebug('[Parser] MRZ expiryDate:', expiryDate); }
     }
   }
 
@@ -3730,7 +3733,7 @@ function parseDocumentText(text: string, documentType: string): {
       }
     }
   }
-  console.log('[Parser] Birthplace line indices:', [...birthplaceLineIndices]);
+  ocrDebug('[Parser] Birthplace line indices:', [...birthplaceLineIndices]);
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
@@ -3755,13 +3758,13 @@ function parseDocumentText(text: string, documentType: string): {
         const sameLineMatch = line.match(/(?:фамили[яь]|surname|насаб)[:\s]+([А-ЯЁа-яёA-Za-z][А-ЯЁа-яёA-Za-z-]+)/i);
         if (sameLineMatch && sameLineMatch[1].length > 1) {
           lastName = sameLineMatch[1].trim();
-          console.log('[Parser] Found lastName (same line):', lastName);
+          ocrDebug('[Parser] Found lastName (same line):', lastName);
         } else {
           // Вариант A: значение на следующей строке
           const cleanSurname = nextLine.replace(/[^а-яёА-ЯЁәӣқҳҷӯa-zA-Z\s-]/g, '').trim();
           if (cleanSurname && cleanSurname.length > 1) {
             lastName = cleanSurname.split(/\s+/)[0]; // первое слово
-            console.log('[Parser] Found lastName (next line):', lastName);
+            ocrDebug('[Parser] Found lastName (next line):', lastName);
           }
         }
       }
@@ -3796,7 +3799,7 @@ function parseDocumentText(text: string, documentType: string): {
         const sameLineMatch = line.match(/(?:имя|first\s*name|ном)[:\s]+([А-ЯЁа-яёA-Za-z][А-ЯЁа-яёA-Za-z-]+)/i);
         if (sameLineMatch && sameLineMatch[1].length > 1) {
           firstName = sameLineMatch[1].trim();
-          console.log('[Parser] Found firstName (same line):', firstName);
+          ocrDebug('[Parser] Found firstName (same line):', firstName);
         } else {
           // Вариант A: значение на следующей строке
           // Российский паспорт: строка «Имя Отчество» содержит оба слова разделённы�� пробелом
@@ -3804,11 +3807,11 @@ function parseDocumentText(text: string, documentType: string): {
           const nameParts = cleanName.split(/\s+/).filter(w => w.length > 1);
           if (nameParts.length >= 1) {
             firstName = nameParts[0];
-            console.log('[Parser] Found firstName (next line):', firstName);
+            ocrDebug('[Parser] Found firstName (next line):', firstName);
             // Если на следующей строке 2 слова — второе это отчество (российский паспорт)
             if (!patronymic && nameParts.length >= 2) {
               patronymic = nameParts[1];
-              console.log('[Parser] Found patronymic (inline with firstName):', patronymic);
+              ocrDebug('[Parser] Found patronymic (inline with firstName):', patronymic);
             }
           }
         }
@@ -3829,12 +3832,12 @@ function parseDocumentText(text: string, documentType: string): {
         const sameLineMatch = line.match(/(?:отчество|patronymic|middle\s*name|падарнома?)[:\s]+([А-ЯЁа-яёA-Za-z][А-ЯЁа-яёA-Za-z-]+)/i);
         if (sameLineMatch && sameLineMatch[1].length > 1) {
           patronymic = sameLineMatch[1].trim();
-          console.log('[Parser] Found patronymic (same line):', patronymic);
+          ocrDebug('[Parser] Found patronymic (same line):', patronymic);
         } else {
           const cleanPat = nextLine.replace(/[^а-яёА-ЯЁa-zA-Z\s-]/g, '').trim();
           if (cleanPat && cleanPat.length > 1) {
             patronymic = cleanPat.split(/\s+/)[0];
-            console.log('[Parser] Found patronymic (next line):', patronymic);
+            ocrDebug('[Parser] Found patronymic (next line):', patronymic);
           }
         }
       }
@@ -3853,7 +3856,7 @@ function parseDocumentText(text: string, documentType: string): {
         lowerLine.includes('санаи')
       )) {
         birthDate = dates[0][0];
-        console.log('[Parser] Found birthDate (inline):', birthDate);
+        ocrDebug('[Parser] Found birthDate (inline):', birthDate);
       }
       // Срок действия
       if (!expiryDate && (
@@ -3865,7 +3868,7 @@ function parseDocumentText(text: string, documentType: string): {
         lowerLine.includes('амал')
       )) {
         expiryDate = dates[0][0];
-        console.log('[Parser] Found expiryDate:', expiryDate);
+        ocrDebug('[Parser] Found expiryDate:', expiryDate);
       }
       // Дата выдачи
       if (!issueDate && (
@@ -3875,7 +3878,7 @@ function parseDocumentText(text: string, documentType: string): {
         lowerLine.includes('берилган')
       )) {
         issueDate = dates[0][0];
-        console.log('[Parser] Found issueDate:', issueDate);
+        ocrDebug('[Parser] Found issueDate:', issueDate);
       }
     }
     
@@ -3887,7 +3890,7 @@ function parseDocumentText(text: string, documentType: string): {
         const nd = [...checkLine.matchAll(datePattern)];
         if (nd.length > 0) {
           birthDate = nd[0][0];
-          console.log('[Parser] Found birthDate (next lines):', birthDate);
+          ocrDebug('[Parser] Found birthDate (next lines):', birthDate);
           break;
         }
       }
@@ -3905,7 +3908,7 @@ function parseDocumentText(text: string, documentType: string): {
         lowerLine.includes('шиноснома')
       )) {
         documentNumber = numMatches[0][0].replace(/\s+/g, ' ').trim();
-        console.log('[Parser] Found documentNumber:', documentNumber);
+        ocrDebug('[Parser] Found documentNumber:', documentNumber);
       }
     }
   }
@@ -3954,7 +3957,7 @@ function parseDocumentText(text: string, documentType: string): {
   ]);
 
   if (!lastName || !firstName) {
-    console.log('[Parser] Fallback: searching for ALL-CAPS Cyrillic name (with stopword filter)...');
+    ocrDebug('[Parser] Fallback: searching for ALL-CAPS Cyrillic name (with stopword filter)...');
 
     // Собираем ВСЕ подходящие заглавные кириллические слова из всех строк
     const allCapsNameWords: string[] = [];
@@ -3981,9 +3984,9 @@ function parseDocumentText(text: string, documentType: string): {
 
       // Вариант 1: на одной строке 2+ имённых слова → берём сразу
       if (capsWordsInLine.length >= 2) {
-        if (!lastName) { lastName = capsWordsInLine[0]; console.log('[Parser] Fallback lastName (same-line):', lastName); }
-        if (!firstName) { firstName = capsWordsInLine[1]; console.log('[Parser] Fallback firstName (same-line):', firstName); }
-        if (!patronymic && capsWordsInLine.length >= 3) { patronymic = capsWordsInLine[2]; console.log('[Parser] Fallback patronymic (same-line):', patronymic); }
+        if (!lastName) { lastName = capsWordsInLine[0]; ocrDebug('[Parser] Fallback lastName (same-line):', lastName); }
+        if (!firstName) { firstName = capsWordsInLine[1]; ocrDebug('[Parser] Fallback firstName (same-line):', firstName); }
+        if (!patronymic && capsWordsInLine.length >= 3) { patronymic = capsWordsInLine[2]; ocrDebug('[Parser] Fallback patronymic (same-line):', patronymic); }
         break;
       }
 
@@ -3995,9 +3998,9 @@ function parseDocumentText(text: string, documentType: string): {
 
     // Если отдельные строки дали 2+ слова — собираем ФИО
     if ((!lastName || !firstName) && allCapsNameWords.length >= 2) {
-      if (!lastName) { lastName = allCapsNameWords[0]; console.log('[Parser] Fallback lastName (multi-line):', lastName); }
-      if (!firstName) { firstName = allCapsNameWords[1]; console.log('[Parser] Fallback firstName (multi-line):', firstName); }
-      if (!patronymic && allCapsNameWords.length >= 3) { patronymic = allCapsNameWords[2]; console.log('[Parser] Fallback patronymic (multi-line):', patronymic); }
+      if (!lastName) { lastName = allCapsNameWords[0]; ocrDebug('[Parser] Fallback lastName (multi-line):', lastName); }
+      if (!firstName) { firstName = allCapsNameWords[1]; ocrDebug('[Parser] Fallback firstName (multi-line):', firstName); }
+      if (!patronymic && allCapsNameWords.length >= 3) { patronymic = allCapsNameWords[2]; ocrDebug('[Parser] Fallback patronymic (multi-line):', patronymic); }
     }
   }
 
@@ -4023,7 +4026,7 @@ function parseDocumentText(text: string, documentType: string): {
         return parseInt(ya) - parseInt(yb) || parseInt(ma) - parseInt(mb);
       });
       birthDate = allDates[0];
-      console.log('[Parser] Fallback birthDate (earliest valid date):', birthDate);
+      ocrDebug('[Parser] Fallback birthDate (earliest valid date):', birthDate);
     }
   }
 
@@ -4046,12 +4049,12 @@ function parseDocumentText(text: string, documentType: string): {
       const tmp = firstName;
       firstName  = patronymic;
       patronymic = tmp;
-      console.log('[Parser] Swap firstName<->patronymic (patronymic suffix on firstName detected):', firstName, '->', patronymic);
+      ocrDebug('[Parser] Swap firstName<->patronymic (patronymic suffix on firstName detected):', firstName, '->', patronymic);
     } else if (firstName && !patronymic && firstIsPatronymic) {
       // firstName содержит отчество, реальное имя не найдено — перемещаем
       patronymic = firstName;
       firstName  = null;
-      console.log('[Parser] firstName moved to patronymic (patronymic suffix, no firstName found):', patronymic);
+      ocrDebug('[Parser] firstName moved to patronymic (patronymic suffix, no firstName found):', patronymic);
     }
   }
 
@@ -4066,7 +4069,7 @@ function parseDocumentText(text: string, documentType: string): {
     // Условие запуска: firstName отсутствует или является стоп-словом (топоним)
     const firstNameNeedsReplacement = !firstName || NAME_STOPWORDS.has(firstName);
     if (firstNameNeedsReplacement) {
-      console.log(`[Parser] Lost-name search triggered (firstName="${firstName}" needs replacement=${firstNameNeedsReplacement})`);
+      ocrDebug(`[Parser] Lost-name search triggered (firstName="${firstName}" needs replacement=${firstNameNeedsReplacement})`);
 
       const patronymicSuffixRx2 = /[оОеЕ][вВ][иИ][чЧ]$|[оОеЕ][вВ][нН][аА]$|OVICH$|EVICH$|OVNA$|EVNA$/i;
       // Прилагательные-окончания мест (АЛТАЙСКОМУ, ЛЕНИНСКОГО, МОСКОВСКОМ и т.д.) — не имена!
@@ -4117,13 +4120,13 @@ function parseDocumentText(text: string, documentType: string): {
       if (candidates.length > 0) {
         // Берём самое длинное (наиболее вероятное настоящее имя)
         const best = candidates.reduce((a, b) => a.length >= b.length ? a : b);
-        console.log(`[Parser] Lost-name promoted: "${best}" (replaced "${firstName}")`);
+        ocrDebug(`[Parser] Lost-name promoted: "${best}" (replaced "${firstName}")`);
         firstName = best;
       } else {
-        console.log('[Parser] Lost-name search found no candidates.');
+        ocrDebug('[Parser] Lost-name search found no candidates.');
       }
     } else {
-      console.log(`[Parser] Lost-name search SKIPPED — firstName="${firstName}" is valid (not a stopword).`);
+      ocrDebug(`[Parser] Lost-name search SKIPPED — firstName="${firstName}" is valid (not a stopword).`);
     }
   }
 
@@ -4133,9 +4136,9 @@ function parseDocumentText(text: string, documentType: string): {
   // должен совпадать с паспортом. Латиницу из MRZ берём, только если страницу
   // распознать не вышло — напр. у иностранного паспорта без кириллицы.
   // ══════════════════════════════════════════════════════════════
-  if (!lastName && mrzLastName)     { lastName = mrzLastName;     console.log('[Parser] lastName ← MRZ (кириллица не найдена)'); }
-  if (!firstName && mrzFirstName)   { firstName = mrzFirstName;   console.log('[Parser] firstName ← MRZ (кириллица не найдена)'); }
-  if (!patronymic && mrzPatronymic) { patronymic = mrzPatronymic; console.log('[Parser] patronymic ← MRZ (кириллица не найдена)'); }
+  if (!lastName && mrzLastName)     { lastName = mrzLastName;     ocrDebug('[Parser] lastName ← MRZ (кириллица не найдена)'); }
+  if (!firstName && mrzFirstName)   { firstName = mrzFirstName;   ocrDebug('[Parser] firstName ← MRZ (кириллица не найдена)'); }
+  if (!patronymic && mrzPatronymic) { patronymic = mrzPatronymic; ocrDebug('[Parser] patronymic ← MRZ (кириллица не найдена)'); }
 
   // ══════════════════════════════════════════════════════════════
   // 📋 Формируем полное имя (Фамилия Имя Отчество)
@@ -4152,7 +4155,7 @@ function parseDocumentText(text: string, documentType: string): {
     documentNumber,
   };
 
-  console.log('[Parser] Final extraction result:', JSON.stringify(result));
+  ocrDebug('[Parser] Final extraction result:', JSON.stringify(result));
   return result;
 }
 
@@ -4221,7 +4224,7 @@ async function autoVerifyDocument(
 }> {
   // Тип не распознан или имя не извлечено → на ручную проверку админу
   if (documentType === 'unknown' || !extractedFullName) {
-    console.log(`[autoVerify] Document sent to manual review: type=${documentType}, name=${extractedFullName || 'null'}`);
+    console.log(`[autoVerify] Document sent to manual review: type=${documentType}, name=${extractedFullName ? "found" : "none"}`);
     return { status: 'pending' };
   }
 
@@ -4279,7 +4282,7 @@ async function autoVerifyDocument(
   
   console.log(`[autoVerify] Document verified!`);
   console.log(`[autoVerify] - Document type: ${documentType}`);
-  console.log(`[autoVerify] - Extracted name: ${extractedFullName}`);
+  ocrDebug(`[autoVerify] - Extracted name: ${extractedFullName}`);
   console.log(`[autoVerify] - Needs profile update: ${needsProfileUpdate}`);
   
   // ✅ 5. Все проверки пройдены - автоматическое одобрение!
@@ -4357,9 +4360,7 @@ app.post("/make-server-4e36197a/documents/upload", async (c) => {
     }
     
     const extractedData = await extractDocumentData(base64Image, documentType);
-    console.log(`[documents/upload] OCR extracted data:`, extractedData);
-    console.log(`[documents/upload] OCR extracted fullName: ${extractedData.fullName || 'NOT FOUND'}`);
-    console.log(`[documents/upload] OCR extracted birthDate: ${extractedData.birthDate || 'NOT FOUND'}`);
+    console.log(`[documents/upload] OCR: name ${extractedData.fullName ? 'found' : 'NOT FOUND'}, birthDate ${extractedData.birthDate ? 'found' : 'NOT FOUND'}`);
     
     // ПРОВЕРКА СООТВЕТСТВИЯ ТИПА ДОКУМЕНТА
     console.log(`[documents/upload] Checking document type match...`);
@@ -4384,7 +4385,7 @@ app.post("/make-server-4e36197a/documents/upload", async (c) => {
     if (documentType === 'passport') {
       // Для паспорта: приоритет OCR данным из фото
       finalFullName = extractedData.fullName || extractedFullName;
-      console.log(`[documents/upload] 🪪 PASSPORT: Using OCR extracted name: ${finalFullName}`);
+      console.log(`[documents/upload] 🪪 PASSPORT: Using OCR extracted name: ${finalFullName ? "found" : "none"}`);
       
       if (extractedData.fullName) {
         console.log(`[documents/upload] Name extracted from passport photo via OCR`);
@@ -4394,7 +4395,7 @@ app.post("/make-server-4e36197a/documents/upload", async (c) => {
     } else {
       // Для других документов: используем ручной ввод для проверки
       finalFullName = extractedFullName || extractedData.fullName;
-      console.log(`[documents/upload] OTHER DOC: Using manually entered name: ${finalFullName}`);
+      console.log(`[documents/upload] OTHER DOC: Using manually entered name: ${finalFullName ? "found" : "none"}`);
     }
 
     // Если тип обнаружен и не совпадает с ожидаемым
@@ -4411,18 +4412,19 @@ app.post("/make-server-4e36197a/documents/upload", async (c) => {
       
       console.log(`[documents/upload] Document type mismatch! Expected: ${expectedName}, but detected: ${detectedName}`);
       
-      // Получаем signed URL для фото (всё равно сохраним для истории)
-      const { data: signedUrlData } = await supabase.storage.from(BUCKET).createSignedUrl(path, 3600 * 24 * 365);
+      // В записи — только путь к скану; ссылка живёт час и выдаётся при просмотре.
+      const { data: signedUrlData } = await supabase.storage.from(BUCKET).createSignedUrl(path, 3600);
       const photoUrl = signedUrlData?.signedUrl || null;
       
       // Сохраняем документ со статусом "rejected"
       const docKey = `ovora:document:${userEmail}:${documentId}`;
       await kv.set(docKey, {
         id: documentId,
+        userEmail,
         type: documentType,
         title,
         subtitle,
-        photoUrl,
+        photoPath: path,
         uploadDate: new Date().toISOString(),
         expiryDate,
         photoQualityScore,
@@ -4484,14 +4486,13 @@ app.post("/make-server-4e36197a/documents/upload", async (c) => {
 
     // 6. Если паспорт одобрен - обновить профиль пользователя
     let updatedUser = null;
-    console.log(`[documents/upload] Checking profile update: status=${verification.status}, needsProfileUpdate=${verification.needsProfileUpdate}, finalFullName=${finalFullName}`);
+    console.log(`[documents/upload] Checking profile update: status=${verification.status}, needsProfileUpdate=${verification.needsProfileUpdate}, name=${finalFullName ? "found" : "none"}`);
     
     if (verification.status === 'verified' && verification.needsProfileUpdate && finalFullName) {
       try {
         const userKey = `ovora:user:email:${userEmail.toLowerCase().trim()}`;
         const existingUser: any = await kv.get(userKey) || {};
         
-        console.log(`[documents/upload] Existing user:`, existingUser);
         
         // Парсим ФИО (формат: "Фамилия Имя Отчество")
         const nameParts = finalFullName.trim().split(/\s+/);
@@ -4506,7 +4507,7 @@ app.post("/make-server-4e36197a/documents/upload", async (c) => {
         if (rawBirthDate && /^\d{2}\.\d{2}\.\d{4}$/.test(rawBirthDate)) {
           const [dd, mm, yyyy] = rawBirthDate.split('.');
           birthDate = `${yyyy}-${mm}-${dd}`;
-          console.log(`[documents/upload] Converted birthDate: ${rawBirthDate} → ${birthDate}`);
+          ocrDebug(`[documents/upload] Converted birthDate: ${rawBirthDate} → ${birthDate}`);
         }
         
         updatedUser = {
@@ -4520,8 +4521,7 @@ app.post("/make-server-4e36197a/documents/upload", async (c) => {
         };
         
         await kv.set(userKey, updatedUser);
-        console.log(`[documents/upload] Profile updated from passport data: ${finalFullName}${birthDate ? `, birthDate: ${birthDate}` : ''}`);
-        console.log(`[documents/upload] Updated user:`, updatedUser);
+        console.log(`[documents/upload] Profile updated from passport data`);
       } catch (profileErr) {
         console.log('[documents/upload] Error updating profile from passport:', profileErr);
       }
@@ -4594,7 +4594,6 @@ app.post("/make-server-4e36197a/documents/upload", async (c) => {
     }
 
     console.log(`[documents/upload] Preparing response:`);
-    console.log(`[documents/upload] - updatedUser:`, updatedUser);
     console.log(`[documents/upload] - profileUpdated:`, updatedUser !== null);
 
     return c.json({ 
@@ -4649,60 +4648,8 @@ app.get("/make-server-4e36197a/documents/user/:email", async (c) => {
   }
 });
 
-/**
- * ✏️ Update document (status, expiry date, etc.)
- */
-app.put("/make-server-4e36197a/documents/:documentId", async (c) => {
-  try {
-    const documentId = c.req.param("documentId");
-    const body = await c.req.json();
-    const { userEmail, callerEmail: _claimedCaller, ...updates } = body;
-    const callerEmail = actingAs(c, _claimedCaller);
-
-    if (!userEmail) {
-      return c.json({ error: "userEmail required" }, 400);
-    }
-    if (!callerEmail || callerEmail.toLowerCase().trim() !== userEmail.toLowerCase().trim()) {
-      return c.json({ error: 'Forbidden' }, 403);
-    }
-
-    const docKey = `ovora:document:${userEmail}:${documentId}`;
-    const existing: any = await kv.get(docKey);
-    
-    if (!existing) {
-      return c.json({ error: "Document not found" }, 404);
-    }
-
-    const updated = {
-      ...existing,
-      ...updates,
-      id: documentId,
-      userEmail,
-      updatedAt: new Date().toISOString(),
-    };
-
-    await kv.set(docKey, updated);
-    console.log(`[documents/update] Document ${documentId} updated`);
-
-    // Create signed URL if document has photo
-    let photoUrl = null;
-    if (updated.photoPath) {
-      const { data } = await supabase.storage.from(BUCKET).createSignedUrl(updated.photoPath, 3600);
-      photoUrl = data?.signedUrl;
-    }
-
-    return c.json({ 
-      success: true, 
-      document: {
-        ...updated,
-        photoUrl
-      }
-    });
-  } catch (err) {
-    console.log("Error PUT /documents:", err);
-    return c.json({ error: 'Внутренняя ошибка сервера' }, 500);
-  }
-});
+// PUT /documents/:id удалён: он сливал в документ любое тело запроса, и владелец мог сам поставить
+// status: 'verified'. Сайт его не вызывал. Статус меняет только админ (PUT /admin/documents/:id/status).
 
 /**
  * 🗑️ Delete document
@@ -4744,47 +4691,7 @@ app.delete("/make-server-4e36197a/documents/:documentId", async (c) => {
   }
 });
 
-/**
- * 🔍 Analyze document (re-scan quality and expiry)
- */
-app.post("/make-server-4e36197a/documents/analyze/:documentId", async (c) => {
-  try {
-    const documentId = c.req.param("documentId");
-    const { userEmail, callerEmail: _claimedCaller } = await c.req.json();
-    const callerEmail = actingAs(c, _claimedCaller);
-
-    if (!userEmail) {
-      return c.json({ error: "userEmail required" }, 400);
-    }
-    if (!callerEmail || callerEmail.toLowerCase().trim() !== userEmail.toLowerCase().trim()) {
-      return c.json({ error: 'Forbidden' }, 403);
-    }
-
-    const docKey = `ovora:document:${userEmail}:${documentId}`;
-    const doc: any = await kv.get(docKey);
-    
-    if (!doc) {
-      return c.json({ error: "Document not found" }, 404);
-    }
-
-    // Simulate re-analysis (slightly randomized)
-    const newScore = Math.min(100, doc.photoQualityScore + Math.floor(Math.random() * 10) - 5);
-    
-    const updated = {
-      ...doc,
-      photoQualityScore: newScore,
-      updatedAt: new Date().toISOString(),
-    };
-
-    await kv.set(docKey, updated);
-    console.log(`[documents/analyze] Document ${documentId} re-analyzed: ${newScore}%`);
-
-    return c.json({ success: true, photoQualityScore: newScore });
-  } catch (err) {
-    console.log("Error POST /documents/analyze:", err);
-    return c.json({ error: 'Внутренняя ошибка сервера' }, 500);
-  }
-});
+// POST /documents/analyze удалён: «переанализ» был случайным числом, сайт его не вызывал.
 
 /**
  * 🧪 Test OCR endpoint - для тестирования распозна��ания документов
@@ -5383,7 +5290,7 @@ app.put("/make-server-4e36197a/admin/users/:email/status", async (c) => {
   try {
     const email = decodeURIComponent(c.req.param("email"));
     const { status } = await c.req.json();
-    if (!status) return c.json({ error: "status required" }, 400);
+    if (status !== 'active' && status !== 'blocked') return c.json({ error: "status must be active or blocked" }, 400);
     const key = `ovora:user:email:${email.toLowerCase().trim()}`;
     const existing: any = await kv.get(key);
     if (!existing) return c.json({ error: "User not found" }, 404);
@@ -6084,17 +5991,20 @@ app.delete("/make-server-4e36197a/notifications/:email", async (c) => {
 app.get("/make-server-4e36197a/users/:email", async (c) => {
   try {
     const email = decodeURIComponent(c.req.param("email"));
-    console.log(`[users/get] Getting user: ${email}`);
-    
     const userKey = `ovora:user:email:${email.toLowerCase().trim()}`;
     const user = await kv.get(userKey);
     
     if (!user) {
-      console.log(`[users/get] User not found: ${email}`);
       return c.json({ error: "User not found" }, 404);
     }
 
     const { codeHash: _ch, passportNumber: _pn, passportData: _pd, ...safeUser } = user as any;
+    // Сайт запрашивает только свой профиль (UserContext). Чужой — без телефона и даты рождения,
+    // как в GET /auth/user/:email: раньше их отдавали любому, кто знает почту.
+    if (!isActingAs(c, email)) {
+      const { phone: _ph, birthDate: _bd, ...publicUser } = safeUser;
+      return c.json({ success: true, user: publicUser });
+    }
     return c.json({ success: true, user: safeUser });
   } catch (err) {
     console.log("Error GET /users/:email:", err);

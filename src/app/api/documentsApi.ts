@@ -127,31 +127,6 @@ export async function getUserDocuments(userEmail: string): Promise<Document[]> {
 }
 
 /**
- * ✏️ Update document
- */
-export async function updateDocument(
-  documentId: string,
-  userEmail: string,
-  updates: Partial<Document>
-): Promise<Document> {
-  const res = await fetch(`${BASE}/documents/${documentId}`, {
-    method: 'PUT',
-    headers: withUserToken(HEADERS),
-    body: JSON.stringify({ userEmail, callerEmail: userEmail, ...updates }),
-  });
-
-  if (!res.ok) {
-    const err = await res.text();
-    throw new Error(`Ошибка обновления документа: ${err}`);
-  }
-
-  const data = await res.json();
-  if (data.error) throw new Error(data.error);
-
-  return data.document;
-}
-
-/**
  * 🗑️ Delete document
  */
 export async function deleteDocument(documentId: string, userEmail: string): Promise<void> {
@@ -170,23 +145,3 @@ export async function deleteDocument(documentId: string, userEmail: string): Pro
   if (data.error) throw new Error(data.error);
 }
 
-/**
- * 🔍 Re-analyze document
- */
-export async function analyzeDocument(documentId: string, userEmail: string): Promise<number> {
-  const res = await fetch(`${BASE}/documents/analyze/${documentId}`, {
-    method: 'POST',
-    headers: withUserToken(HEADERS),
-    body: JSON.stringify({ userEmail, callerEmail: userEmail }),
-  });
-
-  if (!res.ok) {
-    const err = await res.text();
-    throw new Error(`Ошибка анализа документа: ${err}`);
-  }
-
-  const data = await res.json();
-  if (data.error) throw new Error(data.error);
-
-  return data.photoQualityScore;
-}

@@ -433,19 +433,7 @@ export async function deleteMessageFromDb(chatId: string, msgId: string, callerE
 // DOCUMENTS
 // ════════════════════════════════════════════════════════════════
 
-export async function uploadDocument(file: File, email: string, docType: string): Promise<string> {
-  const formData = new FormData();
-  formData.append('file', file);
-  formData.append('email', email);
-  formData.append('docType', docType);
-  const data = await req('POST', '/documents/upload', formData);
-  return data.url;
-}
-
-export async function getUserDocuments(email: string): Promise<any[]> {
-  const data = await req('GET', `/documents/${encodeURIComponent(email)}`);
-  return data.docs;
-}
+// Документы: src/app/api/documentsApi.ts (старые uploadDocument/getUserDocuments вели на несуществующие адреса).
 
 // ══════════════════════════════════════════════════════════════════
 // NOTIFICATIONS
