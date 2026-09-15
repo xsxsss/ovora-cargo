@@ -24,6 +24,8 @@ import * as kv from "./kv_store.tsx";
 import * as capacity from "./capacity.tsx";
 import * as store from "./bookingStore.tsx";
 import * as profile from "./profileStore.tsx";
+import * as chatDb from "./chatTables.tsx";
+import { messagePreview } from "./chatRows.tsx";
 import { DOCUMENT_STATUSES, DOCUMENT_TYPES } from "./profileRows.tsx";
 import { decideAutoVerification } from "./docVerification.tsx";
 import { usePermCodeUserLookup } from "./permCode.tsx";
@@ -1219,16 +1221,9 @@ async function purgeExpiredTrips(): Promise<number> {
   for (const trip of expired) {
     const tripId = trip.id;
     try {
-      // 1. Чаты, привязанные к этой поездке (по chatmeta.tripId)
-      const allMeta: any[] = await kv.getByPrefix('ovora:chatmeta:');
-      const linkedMeta = allMeta.filter((m: any) => m && String(m.tripId) === String(tripId));
-      for (const meta of linkedMeta) {
-        if (!meta.chatId) continue;
-        const msgs: any[] = await kv.getByPrefix(`ovora:chat:${meta.chatId}:`);
-        for (const msg of msgs) {
-          if (msg?.msgId) await kv.del(`ovora:chat:${meta.chatId}:${msg.msgId}`).catch(() => {});
-        }
-        await kv.del(`ovora:chatmeta:${meta.chatId}`).catch(() => {});
+      // 1. Чаты, привязанные к этой поездке (карточка поездки чата = эта поездка); сообщения — каскадом
+      for (const chat of await chatDb.chats.listByTrip(supabase, String(tripId))) {
+        if (String(chat.tripId) === String(tripId)) await chatDb.chats.remove(supabase, chat.chatId);
       }
 
       // 2. Данные трекинга/POD-фото
@@ -1928,7 +1923,7 @@ app.post("/make-server-4e36197a/offers/cleanup", async (c) => {
     if (pendingOffers.length === 0) return c.json({ cancelled: 0 });
 
     // Проверяем наличие чатов
-    const allChatMeta: any[] = await kv.getByPrefix(`ovora:chatmeta:`);
+    const allChatMeta: any[] = await chatDb.chats.listByParticipant(supabase, driverEmail);
     const activeChatPairs = new Set<string>();
     for (const meta of allChatMeta) {
       if (!meta?.participants) continue;
@@ -2015,7 +2010,7 @@ app.put("/make-server-4e36197a/offers/:tripId/:offerId", async (c) => {
     ) {
       try {
         const chatId = generatePairChatId(existing.driverEmail, existing.senderEmail);
-        const chatMessages: any[] = await kv.getByPrefix(`ovora:chat:${chatId}:`);
+        const chatMessages: any[] = await chatDb.messages.list(supabase, chatId);
         const proposalMsg = chatMessages.find(m =>
           m && m.type === 'proposal' &&
           m.proposal?.status === 'pending' &&
@@ -2024,14 +2019,8 @@ app.put("/make-server-4e36197a/offers/:tripId/:offerId", async (c) => {
         );
         if (proposalMsg) {
           const proposalStatus = updated.status === 'accepted' ? 'accepted' : 'rejected';
-          await kv.set(`ovora:chat:${chatId}:${proposalMsg.msgId}`, {
-            ...proposalMsg,
-            proposal: { ...proposalMsg.proposal, status: proposalStatus },
-          });
-          const chatMetaKey = `ovora:chatmeta:${chatId}`;
-          const chatMeta: any = await kv.get(chatMetaKey) || {};
-          await kv.set(chatMetaKey, {
-            ...chatMeta,
+          await chatDb.messages.setProposal(supabase, chatId, proposalMsg.msgId, { ...proposalMsg.proposal, status: proposalStatus });
+          await chatDb.chats.patch(supabase, chatId, {
             proposalStatus,
             lastMessage: proposalStatus === 'accepted' ? 'Оферта принята' : 'Оферта отклонена',
             lastMessageAt: new Date().toISOString(),
@@ -2504,8 +2493,7 @@ app.delete("/make-server-4e36197a/reviews/:reviewId", async (c) => {
 
 // ════════════════════════════���═════════════════════════════════════════════════
 //  CHAT ROUTES — полная поддержка text / proposal / system с��общений
-//  KV: ovora:chat:{chatId}:{msgId}   → message
-//  KV: ovora:chatmeta:{chatId}       → chat metadata (participants, contact info, unread)
+//  Таблицы chats, chat_unread, messages (chatTables.tsx, формат — chatRows.tsx)
 // ══════════════════════════════════════════════════════════════════════════════
 
 /**
@@ -2534,8 +2522,7 @@ app.post("/make-server-4e36197a/chat/init", async (c) => {
     const callerEmail = actingAs(c, body.callerEmail);
     if (!chatId) return c.json({ error: "chatId required" }, 400);
     if (!callerEmail) return c.json({ error: "callerEmail is required" }, 400);
-    const metaKey = `ovora:chatmeta:${chatId}`;
-    const existing: any = await kv.get(metaKey) || {};
+    const existing: any = await chatDb.chats.get(supabase, String(chatId)) || {};
 
     const existingParticipants: string[] = Array.isArray(existing.participants) ? existing.participants : [];
 
@@ -2561,25 +2548,25 @@ app.post("/make-server-4e36197a/chat/init", async (c) => {
 
     // ✅ FIX: Keep ALL tripIds this pair has discussed (not just the latest one).
     // pair-based chat = one chat per driver↔sender pair, can discuss multiple trips.
-    const existingTripIds: string[] = existing.tripIds || (existing.tripId ? [existing.tripId] : []);
-    const newTripIds = tripId && !existingTripIds.includes(String(tripId))
-      ? [...existingTripIds, String(tripId)]
-      : existingTripIds;
 
-    await kv.set(metaKey, {
-      ...existing,
-      chatId,
-      participants: finalParticipants,
-      tripId: tripId || existing.tripId,      // keep for backward compat
-      tripIds: newTripIds,                    // ✅ array of ALL tripIds discussed
-      tripRoute: tripRoute || existing.tripRoute,
-      tripData: tripData || existing.tripData,
-      contactInfo: { ...(existing.contactInfo || {}), ...(contactInfo || {}) },
-      senderInfo: { ...(existing.senderInfo || {}), ...(senderInfo || {}) },
-      lastMessage: existing.lastMessage || null,
-      lastMessageAt: existing.lastMessageAt || null,
-      unreadByEmail: existing.unreadByEmail || {},
-      createdAt: existing.createdAt || new Date().toISOString(),
+    // Запись с проверкой параллельной правки: одновременный init с двух устройств не теряет карточку собеседника.
+    await chatDb.chats.upsert(supabase, String(chatId), (current) => {
+      const base: any = current || {};
+      const baseTripIds: string[] = base.tripIds || [];
+      return {
+        ...base,
+        chatId,
+        participants: base.participants?.length ? base.participants : finalParticipants,
+        tripId: tripId || base.tripId,      // keep for backward compat
+        tripIds: tripId && !baseTripIds.includes(String(tripId)) ? [...baseTripIds, String(tripId)] : baseTripIds,
+        tripRoute: tripRoute || base.tripRoute,
+        tripData: tripData || base.tripData,
+        contactInfo: { ...(base.contactInfo || {}), ...(contactInfo || {}) },
+        senderInfo: { ...(base.senderInfo || {}), ...(senderInfo || {}) },
+        lastMessage: base.lastMessage || null,
+        lastMessageAt: base.lastMessageAt || null,
+        createdAt: base.createdAt || new Date().toISOString(),
+      };
     });
     return c.json({ success: true });
   } catch (err) {
@@ -2606,7 +2593,7 @@ app.post("/make-server-4e36197a/chat/message", async (c) => {
 
     // Проверка: senderId должен быть участником чата. Чата ещё нет (сообщение пришло раньше init) —
     // участники из запроса проверяются так же строго, как в /chat/init. Раньше их брали как есть.
-    const metaCheck: any = await kv.get(`ovora:chatmeta:${chatId}`);
+    const metaCheck: any = await chatDb.chats.get(supabase, String(chatId));
     if (metaCheck?.participants?.length > 0) {
       if (!metaCheck.participants.includes(senderId)) {
         console.warn(`[chat/message] Unauthorized: ${senderId} is not a participant of chat ${chatId}`);
@@ -2615,6 +2602,10 @@ app.post("/make-server-4e36197a/chat/message", async (c) => {
     } else {
       const invalid = await checkNewChatParticipants(String(senderId), participants);
       if (invalid) return c.json({ error: invalid }, 403);
+      // Сообщение пришло раньше init: создаём чат с проверенными участниками (параллельный init не потеряется).
+      await chatDb.chats.upsert(supabase, String(chatId), (current) => current || {
+        chatId, participants: participants.filter(Boolean).map(String), createdAt: new Date().toISOString(),
+      });
     }
 
     const msgId = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -2629,30 +2620,12 @@ app.post("/make-server-4e36197a/chat/message", async (c) => {
       createdAt: now,
       read: false,
     };
-    await kv.set(`ovora:chat:${chatId}:${msgId}`, message);
-
-    // Update chat metadata: lastMessage + increment unread for OTHER participants
-    const metaKey = `ovora:chatmeta:${chatId}`;
-    const meta: any = await kv.get(metaKey) || {};
-    const allParticipants: string[] = meta.participants || participants || [];
-    const unreadByEmail: Record<string, number> = meta.unreadByEmail || {};
-    for (const email of allParticipants) {
-      if (email !== senderId) {
-        unreadByEmail[email] = (unreadByEmail[email] || 0) + 1;
-      }
+    // Сообщение, карточка чата и непрочитанное у остальных — одной транзакцией в базе.
+    if (!(await chatDb.messages.add(supabase, message, messagePreview(message)))) {
+      return c.json({ error: "Chat not found" }, 404);
     }
-    const preview = type === 'proposal' ? 'Новая оферта на перевозку' : (text || '');
-    await kv.set(metaKey, {
-      ...meta,
-      chatId,
-      lastMessage: preview,
-      lastMessageAt: now,
-      lastSenderId: senderId,
-      participants: allParticipants,
-      unreadByEmail,
-      hasProposal: type === 'proposal' ? true : (meta.hasProposal || false),
-      proposalStatus: type === 'proposal' ? 'pending' : (meta.proposalStatus || null),
-    });
+    const meta: any = await chatDb.chats.get(supabase, String(chatId)) || {};
+    const allParticipants: string[] = meta.participants || [];
 
     // ✅ Создать уведомление о новом сообщении для получателей (только для обычных текстовых сообщений)
     if (type === 'text' && text) {
@@ -2685,8 +2658,7 @@ app.post("/make-server-4e36197a/chat/message", async (c) => {
               if (!throttled) {
                 const recipientUser: any = await profile.users.get(supabase, recipientEmail).catch(() => null);
                 const recipientFirstName = recipientUser?.firstName || 'Пользователь';
-                const chatMeta: any = await kv.get(`ovora:chatmeta:${chatId}`).catch(() => null);
-                const tripRoute = chatMeta?.tripRoute;
+                const tripRoute = meta?.tripRoute;
                 const tpl = newMessageTemplate({
                   recipientName: recipientFirstName,
                   senderName: senderName || 'Пользователь',
@@ -2719,7 +2691,7 @@ app.get("/make-server-4e36197a/chat/:chatId/messages", async (c) => {
     if (!callerEmail) return c.json({ error: "callerEmail query param required" }, 400);
 
     // IDOR fix: verify caller is a participant before exposing messages
-    const meta: any = await kv.get(`ovora:chatmeta:${chatId}`);
+    const meta: any = await chatDb.chats.get(supabase, chatId);
     // Чата нет (ещё не создан или удалён) — сообщения без участников никому не отдаются.
     if (!meta?.participants?.length) return c.json({ messages: [] });
     if (!meta.participants.includes(callerEmail)) {
@@ -2727,11 +2699,7 @@ app.get("/make-server-4e36197a/chat/:chatId/messages", async (c) => {
       return c.json({ error: "Forbidden: you are not a participant of this chat" }, 403);
     }
 
-    const messages: any[] = await kv.getByPrefix(`ovora:chat:${chatId}:`);
-    const sorted = messages
-      .filter(m => m && m.msgId)
-      .sort((a, b) => (a.ts || 0) - (b.ts || 0));
-    return c.json({ messages: sorted });
+    return c.json({ messages: await chatDb.messages.list(supabase, chatId) });
   } catch (err) {
     console.log("Error GET /chat/:chatId/messages:", err);
     return c.json({ error: 'Внутренняя ошибка сервера' }, 500);
@@ -2745,16 +2713,14 @@ app.put("/make-server-4e36197a/chat/:chatId/read", async (c) => {
     const userEmail = actingAs(c, (await c.req.json()).userEmail);
     if (!userEmail) return c.json({ error: "userEmail required" }, 400);
 
-    const metaKey = `ovora:chatmeta:${chatId}`;
-    const meta: any = await kv.get(metaKey) || {};
+    const meta: any = await chatDb.chats.get(supabase, chatId) || {};
     if (!meta?.participants?.length) return c.json({ success: true }); // чата нет — отмечать нечего
 
     if (!meta.participants.includes(userEmail)) {
       return c.json({ error: "Forbidden: you are not a participant of this chat" }, 403);
     }
 
-    const unreadByEmail = { ...(meta.unreadByEmail || {}), [userEmail]: 0 };
-    await kv.set(metaKey, { ...meta, unreadByEmail });
+    await chatDb.chats.markRead(supabase, chatId, userEmail);
     return c.json({ success: true });
   } catch (err) {
     console.log("Error PUT /chat/:chatId/read:", err);
@@ -2787,9 +2753,7 @@ app.put("/make-server-4e36197a/chat/:chatId/proposal/:proposalId", async (c) => 
       senderId,
     });
 
-    // Update chat metadata
-    const metaKey = `ovora:chatmeta:${chatId}`;
-    const meta: any = await kv.get(metaKey) || {};
+    const meta: any = await chatDb.chats.get(supabase, chatId) || {};
     if (!meta?.participants?.length) return c.json({ error: "Chat not found" }, 404);
     if (!meta.participants.includes(senderId)) {
       console.warn(`[proposal] IDOR attempt: ${senderId} tried to update proposal in chat ${chatId}`);
@@ -2797,8 +2761,7 @@ app.put("/make-server-4e36197a/chat/:chatId/proposal/:proposalId", async (c) => 
     }
 
     // Find the message containing this proposal
-    const messages: any[] = await kv.getByPrefix(`ovora:chat:${chatId}:`);
-    const msg = messages.find(m => m && m.proposal?.id === proposalId);
+    const msg: any = await chatDb.messages.findByProposalId(supabase, chatId, proposalId);
     if (!msg) return c.json({ error: "Proposal message not found" }, 404);
 
     if (msg.proposal.status === status) return c.json({ success: true });
@@ -2817,14 +2780,20 @@ app.put("/make-server-4e36197a/chat/:chatId/proposal/:proposalId", async (c) => 
     }
 
     const updatedMsg = { ...msg, proposal: { ...msg.proposal, status } };
-    await kv.set(`ovora:chat:${chatId}:${msg.msgId}`, updatedMsg);
+    await chatDb.messages.setProposal(supabase, chatId, msg.msgId, updatedMsg.proposal);
+    // Возврат оферты в прежнее состояние, если принять не удалось (нет заявки, нет мест).
+    const revertProposal = async () => {
+      await chatDb.messages.setProposal(supabase, chatId, msg.msgId, msg.proposal);
+      await chatDb.chats.patch(supabase, chatId, {
+        proposalStatus: meta.proposalStatus ?? null, lastMessage: meta.lastMessage ?? null, lastMessageAt: meta.lastMessageAt ?? null,
+      });
+    };
     const preview = status === 'accepted' 
       ? 'Оферта принята' 
       : status === 'declined'
       ? 'Оферта отменена'
       : 'Оферта отклонена';
-    await kv.set(metaKey, {
-      ...meta,
+    await chatDb.chats.patch(supabase, chatId, {
       proposalStatus: status,
       lastMessage: preview,
       lastMessageAt: new Date().toISOString(),
@@ -2870,8 +2839,7 @@ app.put("/make-server-4e36197a/chat/:chatId/proposal/:proposalId", async (c) => 
           // Pass 3: no offer found — log warning instead of creating phantom offer from regex (LOG-7/ROOT-8)
           if (!matchingOffer) {
             console.warn(`[accept] No offer found for tripId=${tripId}, senderEmail=${senderEmail} — cannot accept without a real offer record`);
-            await kv.set(`ovora:chat:${chatId}:${msg.msgId}`, msg);
-            await kv.set(metaKey, meta);
+            await revertProposal();
             return c.json({ error: "OFFER_NOT_FOUND: no matching offer exists for this proposal. Sender should resubmit through the trip page." }, 404);
           }
 
@@ -2880,8 +2848,7 @@ app.put("/make-server-4e36197a/chat/:chatId/proposal/:proposalId", async (c) => 
             const result = await store.offers.accept(supabase, String(tripId), matchingOffer.offerId);
             if (result !== 'ok') {
               console.warn(`[accept] ${result} on trip ${tripId} — reverting proposal to pending`);
-              await kv.set(`ovora:chat:${chatId}:${msg.msgId}`, msg);
-              await kv.set(metaKey, meta);
+              await revertProposal();
               const [status, error] = ACCEPT_ERRORS[result] || [409, result];
               return c.json({ error }, status);
             }
@@ -3027,9 +2994,8 @@ app.get("/make-server-4e36197a/chats/user/:email", async (c) => {
     const email = decodeURIComponent(c.req.param("email"));
     // В списке — контакты собеседников (телефоны) и последние сообщения. Раньше отдавался любому, кто знает почту.
     if (!isActingAs(c, email)) return c.json(FORBIDDEN_NOT_YOU, 403);
-    const allMeta: any[] = await kv.getByPrefix(`ovora:chatmeta:`);
+    const allMeta: any[] = await chatDb.chats.listByParticipant(supabase, email);
     const userChats = allMeta
-      .filter(m => m && Array.isArray(m.participants) && m.participants.includes(email))
       .filter(m => !m.chatId?.startsWith('demo_')) // никогда не возвращать демо-чаты
       .map(m => ({
         ...m,
@@ -3060,8 +3026,7 @@ app.put("/make-server-4e36197a/users/:email/sync-chats", async (c) => {
     console.log(`[sync-chats] Syncing name "${displayName}" for user ${email}`);
 
     // Get all chats where this user is a participant
-    const allMeta: any[] = await kv.getByPrefix(`ovora:chatmeta:`);
-    const userChats = allMeta.filter(m => m && Array.isArray(m.participants) && m.participants.includes(email));
+    const userChats: any[] = await chatDb.chats.listByParticipant(supabase, email);
 
     let updatedCount = 0;
     for (const meta of userChats) {
@@ -3105,7 +3070,7 @@ app.put("/make-server-4e36197a/users/:email/sync-chats", async (c) => {
       }
 
       if (changed) {
-        await kv.set(`ovora:chatmeta:${chatId}`, updatedMeta);
+        await chatDb.chats.patch(supabase, chatId, { contactInfo: updatedMeta.contactInfo, senderInfo: updatedMeta.senderInfo });
         updatedCount++;
         console.log(`[sync-chats] Updated chat ${chatId}`);
       }
@@ -3178,8 +3143,7 @@ app.delete("/make-server-4e36197a/chat/:chatId", async (c) => {
     console.log(`[delete-chat] Deleting chat: ${chatId}`);
 
     // 0. Read chatmeta BEFORE deleting — need tripIds + participants to reset offers
-    const metaKey = `ovora:chatmeta:${chatId}`;
-    const meta: any = await kv.get(metaKey) || {};
+    const meta: any = await chatDb.chats.get(supabase, chatId) || {};
 
     // IDOR fix: only participants may delete the chat
     const participants: string[] = meta.participants || [];
@@ -3224,19 +3188,12 @@ app.delete("/make-server-4e36197a/chat/:chatId", async (c) => {
       }
     }
 
-    // 1. Delete all messages
-    const msgs: any[] = await kv.getByPrefix(`ovora:chat:${chatId}:`);
-    for (const msg of msgs) {
-      if (msg?.msgId) {
-        await kv.del(`ovora:chat:${chatId}:${msg.msgId}`);
-      }
-    }
+    // 1. Чат вместе с сообщениями и непрочитанным (каскад в базе)
+    const deletedMessages = await chatDb.messages.count(supabase, chatId);
+    await chatDb.chats.remove(supabase, chatId);
 
-    // 2. Delete chat metadata
-    await kv.del(metaKey);
-
-    console.log(`[delete-chat] Deleted chat ${chatId}: ${msgs.length} messages`);
-    return c.json({ success: true, deletedMessages: msgs.length });
+    console.log(`[delete-chat] Deleted chat ${chatId}: ${deletedMessages} messages`);
+    return c.json({ success: true, deletedMessages });
   } catch (err) {
     console.log("Error DELETE /chat/:chatId:", err);
     return c.json({ error: 'Внутренняя ошибка сервера' }, 500);
@@ -3254,7 +3211,7 @@ app.delete("/make-server-4e36197a/chat/:chatId/message/:msgId", async (c) => {
     if (!callerEmail) return c.json({ error: "callerEmail query param required" }, 400);
 
     // Only the message author may delete it
-    const existing: any = await kv.get(`ovora:chat:${chatId}:${msgId}`);
+    const existing: any = await chatDb.messages.get(supabase, chatId, msgId);
     if (!existing) return c.json({ error: "Message not found" }, 404);
     if (existing.senderId !== callerEmail) {
       console.warn(`[delete-message] Unauthorized: ${callerEmail} tried to delete message by ${existing.senderId}`);
@@ -3263,38 +3220,17 @@ app.delete("/make-server-4e36197a/chat/:chatId/message/:msgId", async (c) => {
 
     console.log(`[delete-message] Deleting message ${msgId} from chat ${chatId}`);
 
-    // Delete the message
-    await kv.del(`ovora:chat:${chatId}:${msgId}`);
+    await chatDb.messages.remove(supabase, chatId, msgId);
 
-    // Update chat metadata: find new lastMessage
-    const remainingMsgs: any[] = await kv.getByPrefix(`ovora:chat:${chatId}:`);
-    const sorted = remainingMsgs
-      .filter(m => m && m.msgId)
-      .sort((a, b) => (b.ts || 0) - (a.ts || 0)); // newest first
+    // Карточка чата: последнее сообщение — из оставшихся
+    const lastMsg = await chatDb.messages.latest(supabase, chatId);
+    await chatDb.chats.patch(supabase, chatId, lastMsg
+      ? { lastMessage: messagePreview(lastMsg), lastMessageAt: lastMsg.createdAt, lastSenderId: lastMsg.senderId }
+      : { lastMessage: 'Новый чат', lastMessageAt: null });
+    const remainingMessages = await chatDb.messages.count(supabase, chatId);
 
-    const metaKey = `ovora:chatmeta:${chatId}`;
-    const meta: any = await kv.get(metaKey) || {};
-
-    if (sorted.length > 0) {
-      const lastMsg = sorted[0];
-      const preview = lastMsg.type === 'proposal' ? 'Новая оферта на перевозку' : (lastMsg.text || '');
-      await kv.set(metaKey, {
-        ...meta,
-        lastMessage: preview,
-        lastMessageAt: lastMsg.createdAt,
-        lastSenderId: lastMsg.senderId,
-      });
-    } else {
-      // No messages left → set empty state
-      await kv.set(metaKey, {
-        ...meta,
-        lastMessage: 'Новый чат',
-        lastMessageAt: null,
-      });
-    }
-
-    console.log(`[delete-message] Deleted message ${msgId}, remaining: ${sorted.length}`);
-    return c.json({ success: true, remainingMessages: sorted.length });
+    console.log(`[delete-message] Deleted message ${msgId}, remaining: ${remainingMessages}`);
+    return c.json({ success: true, remainingMessages });
   } catch (err) {
     console.log("Error DELETE /chat/:chatId/message/:msgId:", err);
     return c.json({ error: 'Внутренняя ошибка сервера' }, 500);
@@ -4822,8 +4758,8 @@ app.get("/make-server-4e36197a/admin/shipments", async (c) => {
 // т.к. эндпоинт уже защищён глобальным requireAdminChecked + requireRole(['cargo-admin'])
 app.get("/make-server-4e36197a/admin/chats", async (c) => {
   try {
-    const chats: any[] = await kv.getByPrefix("ovora:chatmeta:");
-    const { items, total, limit, offset } = paginate(c, chats.filter(ch => ch && ch.chatId));
+    const chats: any[] = await chatDb.chats.listAll(supabase);
+    const { items, total, limit, offset } = paginate(c, chats);
     return c.json({ chats: items, total, limit, offset });
   } catch (err) {
     return c.json({ error: 'Внутренняя ошибка сервера' }, 500);
@@ -4834,9 +4770,7 @@ app.get("/make-server-4e36197a/admin/chats", async (c) => {
 app.get("/make-server-4e36197a/admin/chat/:chatId/messages", async (c) => {
   try {
     const chatId = c.req.param("chatId");
-    const messages: any[] = await kv.getByPrefix(`ovora:chat:${chatId}:`);
-    const sorted = messages.filter(m => m && m.msgId).sort((a, b) => (a.ts || 0) - (b.ts || 0));
-    return c.json({ messages: sorted });
+    return c.json({ messages: await chatDb.messages.list(supabase, chatId) });
   } catch (err) {
     return c.json({ error: 'Внутренняя ошибка сервера' }, 500);
   }
