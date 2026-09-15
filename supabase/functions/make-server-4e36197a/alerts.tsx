@@ -60,8 +60,15 @@ export async function resolveChatId(kv: AlertKV, fetchFn: Fetch, token: string):
   const saved = await kv.get(CHAT_KEY);
   if (typeof saved === 'number') return { chatId: saved, isNew: false };
   const updates = await telegram(fetchFn, token, 'getUpdates');
+  if (updates?.ok === false) {
+    console.warn(`[alerts] Telegram отклонил токен или запрос: ${updates?.description || 'без описания'}`);
+    return { chatId: null, isNew: false };
+  }
   const chat = (updates?.result || []).map((u: any) => u?.message?.chat).find((c: any) => c?.type === 'private');
-  if (typeof chat?.id !== 'number') return { chatId: null, isNew: false };
+  if (typeof chat?.id !== 'number') {
+    console.warn('[alerts] Боту ещё никто не написал в личку за последние сутки — некуда отправлять');
+    return { chatId: null, isNew: false };
+  }
   await kv.set(CHAT_KEY, chat.id);
   return { chatId: chat.id, isNew: true };
 }

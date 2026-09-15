@@ -44,14 +44,16 @@ app.use('*', logger(console.log));
 // Стоит первым: видит итоговый статус любого ответа, в том числе после исключения.
 const ALERT_SITE = (Deno.env.get('SUPABASE_URL') || '').includes('mkbcjxnoeevtkzaqcpsh') ? 'боевой' : 'тестовый';
 let alertsAnnounced = false;
+let alertsChecked = 0;
 app.use('*', async (c, next) => {
   await next();
   const token = (Deno.env.get('TELEGRAM_BOT_TOKEN') || '').trim();
   if (!token) return;
   try {
-    if (!alertsAnnounced) {
-      alertsAnnounced = true;
-      await announceIfNew(kv, fetch, token, ALERT_SITE);
+    // Пока чат не найден (владелец ещё не написал боту) — пробуем снова, но не чаще раза в 5 минут.
+    if (!alertsAnnounced && Date.now() - alertsChecked > 5 * 60_000) {
+      alertsChecked = Date.now();
+      alertsAnnounced = (await announceIfNew(kv, fetch, token, ALERT_SITE)) || typeof (await kv.get('ovora:alerts:telegram_chat_id')) === 'number';
     }
     if (c.res.status >= 500) {
       await recordServerError(kv, fetch, token, ALERT_SITE, errorKind(c.req.method, c.req.path, c.res.status));
